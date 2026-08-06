@@ -4,6 +4,9 @@
 #include "modules/SystemCommandsModule.h"
 #endif
 #include "modules/StatusLEDModule.h"
+#ifdef DISTANCE_MONITOR_ENABLED
+#include "modules/distance_monitor/DistanceMonitorModule.h"
+#endif
 #if !MESHTASTIC_EXCLUDE_REPLYBOT
 #include "ReplyBotModule.h"
 #endif
@@ -176,6 +179,9 @@ void setupModules()
     new PowerStressModule();
 #endif
     // Example: Put your module here
+#ifdef DISTANCE_MONITOR_ENABLED
+    new DistanceMonitorModule();
+#endif
     // new ReplyModule();
 #if HAS_SCREEN && !MESHTASTIC_EXCLUDE_CANNEDMESSAGES
     if (config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
