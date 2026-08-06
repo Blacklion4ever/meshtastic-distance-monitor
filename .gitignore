@@ -56,4 +56,5 @@ CMakeLists.txt
 .python3
 .claude/scheduled_tasks.lock
 userPrefs.jsonc.mcp-session-bak
-.vscode/settings.json
+
+variants/nrf52840/diy/distance-monitor/platformio.ini
