@@ -5,7 +5,7 @@ web
 web.tar
 
 # ignore vscode IDE settings files
-.vscode/*
+.vscode
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/extensions.json
@@ -58,3 +58,4 @@ CMakeLists.txt
 userPrefs.jsonc.mcp-session-bak
 
 variants/nrf52840/diy/distance-monitor/platformio.ini
+.vscode/settings.json
