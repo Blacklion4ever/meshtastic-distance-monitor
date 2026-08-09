@@ -2,32 +2,6 @@
 
 #include <cmath>
 #include <cstdio>
-#include <ctime>
-
-void dmFormatTimestampUtc(uint32_t timestamp, char *buffer, size_t bufferSize)
-{
-    if (buffer == nullptr || bufferSize == 0)
-    {
-        return;
-    }
-
-    if (timestamp == 0)
-    {
-        std::snprintf(buffer, bufferSize, "n/a");
-        return;
-    }
-
-    const time_t timestampValue = static_cast<time_t>(timestamp);
-    struct tm utcTime;
-
-    if (gmtime_r(&timestampValue, &utcTime) == nullptr)
-    {
-        std::snprintf(buffer, bufferSize, "invalid");
-        return;
-    }
-
-    std::strftime(buffer, bufferSize, "%Y-%m-%d %H:%M:%S UTC", &utcTime);
-}
 
 void dmFormatAge(uint32_t totalSeconds, char *buffer, size_t bufferSize)
 {
@@ -121,27 +95,17 @@ const char *dmRadioStateName(DmRadioState state)
     }
 }
 
-const char *dmPositionStateName(DmPositionState state)
+const char *dmPositionKindName(DmPositionKind kind)
 {
-    switch (state)
+    switch (kind)
     {
-    case DmPositionState::Missing:
-        return "MISSING";
-    case DmPositionState::NoFix:
-        return "NO_FIX";
-    case DmPositionState::PoorHdop:
-        return "POOR_HDOP";
-    case DmPositionState::NoTimestamp:
-        return "NO_TIME";
-    case DmPositionState::InvalidTimestamp:
-        return "BAD_TIME";
-    case DmPositionState::Stale:
-        return "STALE";
-    case DmPositionState::Valid:
-        return "VALID";
-    case DmPositionState::Unknown:
+    case DmPositionKind::FreshFix:
+        return "FRESH";
+    case DmPositionKind::CachedStationary:
+        return "CACHED";
+    case DmPositionKind::NoFix:
     default:
-        return "UNKNOWN";
+        return "NO_FIX";
     }
 }
 

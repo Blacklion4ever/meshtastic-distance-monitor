@@ -6,15 +6,6 @@
 #include <cstdint>
 
 /**
- * Format a Unix timestamp as a compact UTC string.
- *
- * @param timestamp Unix epoch timestamp in seconds. Zero means unavailable.
- * @param buffer Destination character buffer.
- * @param bufferSize Size of the destination buffer.
- */
-void dmFormatTimestampUtc(uint32_t timestamp, char *buffer, size_t bufferSize);
-
-/**
  * Format a duration in a compact human-readable form suitable for summary logs.
  *
  * Examples: "12s", "1m05s", "2h03m", "1d02h".
@@ -49,8 +40,8 @@ double dmCalculateDistanceMeters(
 /** Return a stable printable name for a radio state. */
 const char *dmRadioStateName(DmRadioState state);
 
-/** Return a stable printable name for a position state. */
-const char *dmPositionStateName(DmPositionState state);
+/** Return a stable printable name for a semantic position kind. */
+const char *dmPositionKindName(DmPositionKind kind);
 
 /** Return a stable printable name for a distance state. */
 const char *dmDistanceStateName(DmDistanceState state);
