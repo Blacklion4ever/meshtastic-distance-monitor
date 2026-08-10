@@ -181,7 +181,7 @@ void setupModules()
     new PowerStressModule();
 #endif
     // Example: Put your module here
-    new DistanceMonitorModule();
+    distanceMonitorModule = new DistanceMonitorModule();
     // new ReplyModule();
 #if HAS_SCREEN && !MESHTASTIC_EXCLUDE_CANNEDMESSAGES
     if (config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR)

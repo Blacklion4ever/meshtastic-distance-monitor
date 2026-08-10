@@ -15,6 +15,7 @@
 #include "main.h"
 #include "modules/AdminModule.h"
 #include "modules/ExternalNotificationModule.h"
+#include "modules/distance_monitor/DistanceMonitorModule.h"
 
 SystemCommandsModule *systemCommandsModule;
 
@@ -86,6 +87,11 @@ int SystemCommandsModule::handleInputEvent(const InputEvent *event)
     }
 
     switch (event->inputEvent) {
+    case INPUT_BROKER_USER_PRESS:
+        if (distanceMonitorModule && distanceMonitorModule->handleSingleButtonPress()) {
+            return true;
+        }
+        break;
         // GPS
     case INPUT_BROKER_GPS_TOGGLE:
 #if !MESHTASTIC_EXCLUDE_GPS
@@ -104,6 +110,9 @@ int SystemCommandsModule::handleInputEvent(const InputEvent *event)
         return true;
     // Mesh ping
     case INPUT_BROKER_SEND_PING:
+        if (distanceMonitorModule && distanceMonitorModule->handleDoubleButtonPress()) {
+            return true;
+        }
         service->refreshLocalMeshNode();
         if (service->trySendPosition(NODENUM_BROADCAST, true)) {
             IF_SCREEN(screen->showSimpleBanner("Position\nSent", 3000));
@@ -112,9 +121,14 @@ int SystemCommandsModule::handleInputEvent(const InputEvent *event)
         }
         return true;
     // Power control
-    case INPUT_BROKER_SHUTDOWN:
-        shutdownAtMsec = millis();
+    case INPUT_BROKER_SHUTDOWN: {
+        uint32_t shutdownDelayMs = 0U;
+        if (distanceMonitorModule) {
+            shutdownDelayMs = distanceMonitorModule->prepareLocalShutdown();
+        }
+        shutdownAtMsec = millis() + shutdownDelayMs;
         return true;
+    }
     // factory reset
     case INPUT_BROKER_FACTORY_RST:
         disableBluetooth();
