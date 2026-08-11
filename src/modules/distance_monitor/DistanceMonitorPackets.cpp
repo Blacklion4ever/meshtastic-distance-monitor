@@ -13,35 +13,50 @@
 
 namespace
 {
-void writeU32Le(uint8_t *buffer, size_t offset, uint32_t value)
-{
-    buffer[offset] = static_cast<uint8_t>(value & 0xFFU);
-    buffer[offset + 1U] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
-    buffer[offset + 2U] = static_cast<uint8_t>((value >> 16U) & 0xFFU);
-    buffer[offset + 3U] = static_cast<uint8_t>((value >> 24U) & 0xFFU);
-}
+    void writeU32Le(uint8_t *buffer, size_t offset, uint32_t value)
+    {
+        buffer[offset] = static_cast<uint8_t>(value & 0xFFU);
+        buffer[offset + 1U] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
+        buffer[offset + 2U] = static_cast<uint8_t>((value >> 16U) & 0xFFU);
+        buffer[offset + 3U] = static_cast<uint8_t>((value >> 24U) & 0xFFU);
+    }
 
-uint32_t readU32Le(const uint8_t *buffer, size_t offset)
-{
-    return static_cast<uint32_t>(buffer[offset]) |
-           (static_cast<uint32_t>(buffer[offset + 1U]) << 8U) |
-           (static_cast<uint32_t>(buffer[offset + 2U]) << 16U) |
-           (static_cast<uint32_t>(buffer[offset + 3U]) << 24U);
-}
+    uint32_t readU32Le(const uint8_t *buffer, size_t offset)
+    {
+        return static_cast<uint32_t>(buffer[offset]) |
+               (static_cast<uint32_t>(buffer[offset + 1U]) << 8U) |
+               (static_cast<uint32_t>(buffer[offset + 2U]) << 16U) |
+               (static_cast<uint32_t>(buffer[offset + 3U]) << 24U);
+    }
 
-int8_t encodeSignedByte(float value)
-{
-    const long rounded = std::lround(value);
-    return static_cast<int8_t>(
-        std::max<long>(-127L, std::min<long>(127L, rounded)));
-}
+    int8_t encodeSignedByte(float value)
+    {
+        const long rounded = std::lround(value);
+        return static_cast<int8_t>(
+            std::max<long>(-127L, std::min<long>(127L, rounded)));
+    }
 
-uint8_t encodeUnsignedByte(float value)
-{
-    const long rounded = std::lround(value);
-    return static_cast<uint8_t>(
-        std::max<long>(0L, std::min<long>(255L, rounded)));
-}
+    uint8_t encodeUnsignedByte(float value)
+    {
+        const long rounded = std::lround(value);
+        return static_cast<uint8_t>(
+            std::max<long>(0L, std::min<long>(255L, rounded)));
+    }
+
+    bool isSearchDirectPacket(const meshtastic_MeshPacket &packet)
+    {
+        const bool lora =
+            packet.transport_mechanism ==
+                meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA ||
+            packet.transport_mechanism ==
+                meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA_ALT1 ||
+            packet.transport_mechanism ==
+                meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA_ALT2 ||
+            packet.transport_mechanism ==
+                meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA_ALT3;
+
+        return lora && !packet.via_mqtt && packet.hop_limit == 0U;
+    }
 }
 
 ProcessMessage DistanceMonitorModule::handleReceived(
@@ -600,8 +615,7 @@ void DistanceMonitorModule::handleSearchStart(
     if (!findLocalIndex(localIndex) ||
         nodeStates_[localIndex].isBase ||
         !sender.isBase ||
-        !sender.paired ||
-        !isDirectPacket(mp))
+        !isSearchDirectPacket(mp))
     {
         return;
     }
@@ -630,7 +644,7 @@ void DistanceMonitorModule::handleSearchBeacon(
         !sender.paired ||
         !searchModeActive_ ||
         senderIndex != searchTargetIndex_ ||
-        !isDirectPacket(mp))
+        !isSearchDirectPacket(mp))
     {
         return;
     }
@@ -657,8 +671,7 @@ void DistanceMonitorModule::handleSearchStop(
     if (!findLocalIndex(localIndex) ||
         nodeStates_[localIndex].isBase ||
         !sender.isBase ||
-        !sender.paired ||
-        !isDirectPacket(mp) ||
+        !isSearchDirectPacket(mp) ||
         !trackerSearchActive_ ||
         trackerSearchBaseNode_ != sender.nodeNum)
     {
