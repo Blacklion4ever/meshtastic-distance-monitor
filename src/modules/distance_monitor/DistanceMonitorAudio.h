@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DistanceMonitorConfig.h"
-
 #include "concurrency/OSThread.h"
 
 #include <cstddef>
@@ -20,10 +19,14 @@ class DistanceMonitorAudio : private concurrency::OSThread
     void playFaultBops();
     void playPairingBops();
     void playTrackerNotification();
+    void playSearchEnter();
+    void playSearchExit();
+    void playSearchPulse(float proximity);
 
     bool startSos();
     void stopSos();
     bool isSosActive() const { return sosActive_; }
+    bool isBusyAboveSearch() const;
 
   protected:
     int32_t runOnce() override;
@@ -39,11 +42,14 @@ class DistanceMonitorAudio : private concurrency::OSThread
     enum class Pattern : uint8_t
     {
         None = 0,
+        SearchPulse,
         DistanceBip,
         ConfirmationBop,
         FaultBops,
         Pairing,
         TrackerNotification,
+        SearchEnter,
+        SearchExit,
     };
 
     uint8_t buzzerPin_ = 0U;
@@ -55,10 +61,12 @@ class DistanceMonitorAudio : private concurrency::OSThread
     uint32_t stepStartedMs_ = 0U;
     bool stepRunning_ = false;
 
+    Step dynamicSearchSteps_[7] = {};
+    size_t dynamicSearchStepCount_ = 0U;
+
     void startPattern(Pattern pattern);
     int patternPriority(Pattern pattern) const;
     const Step *patternSteps(Pattern pattern, size_t &count) const;
-
     void startTone(uint16_t frequencyHz);
     void stopTone();
 };

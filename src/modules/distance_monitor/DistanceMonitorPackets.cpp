@@ -42,7 +42,7 @@ uint8_t encodeUnsignedByte(float value)
     return static_cast<uint8_t>(
         std::max<long>(0L, std::min<long>(255L, rounded)));
 }
-} // namespace
+}
 
 ProcessMessage DistanceMonitorModule::handleReceived(
     const meshtastic_MeshPacket &mp)
@@ -125,6 +125,18 @@ ProcessMessage DistanceMonitorModule::handleReceived(
     case DmMessageType::ShutdownNotice:
         handleShutdownNotice(sender, mp, nowMs);
         break;
+
+    case DmMessageType::SearchStart:
+        handleSearchStart(senderIndex, sender, mp, nowMs);
+        break;
+
+    case DmMessageType::SearchBeacon:
+        handleSearchBeacon(senderIndex, sender, mp, nowMs);
+        break;
+
+    case DmMessageType::SearchStop:
+        handleSearchStop(senderIndex, sender, mp, nowMs);
+        break;
     }
 
     return ProcessMessage::CONTINUE;
@@ -137,32 +149,68 @@ bool DistanceMonitorModule::wantPacket(
            packet->decoded.portnum == meshtastic_PortNum_PRIVATE_APP;
 }
 
+void DistanceMonitorModule::noteRemoteSession(
+    DmNodeState &sender,
+    uint32_t sessionId,
+    uint32_t nowMs)
+{
+    const bool changed = sender.hasRemoteSession &&
+                         sender.remoteSessionId != sessionId;
+    if (changed)
+    {
+        const bool previouslyPaired = sender.paired || sender.everPaired;
+        const uint32_t oldSession = sender.remoteSessionId;
+        sender.paired = false;
+        sender.hasRemoteUptime = false;
+        sender.pairedLocalSessionId = 0U;
+        sender.pairedRemoteSessionId = 0U;
+
+        if (previouslyPaired)
+        {
+            sender.faultCause = DmFaultCause::Unpaired;
+            sender.faultStartedMs = nowMs;
+            sender.hasFaultAudioTime = false;
+            sender.faultSnoozedUntilMs = 0U;
+            LOG_WARN(
+                "Distance Monitor unpaired: node=!%08lx remote session changed %08lx -> %08lx",
+                static_cast<unsigned long>(sender.nodeNum),
+                static_cast<unsigned long>(oldSession),
+                static_cast<unsigned long>(sessionId));
+        }
+    }
+
+    sender.hasRemoteSession = true;
+    sender.remoteSessionId = sessionId;
+}
+
+void DistanceMonitorModule::clearUnpairedFault(DmNodeState &sender)
+{
+    if (sender.faultCause == DmFaultCause::Unpaired)
+    {
+        LOG_INFO("Distance Monitor re-paired: node=!%08lx",
+                 static_cast<unsigned long>(sender.nodeNum));
+        sender.faultCause = DmFaultCause::None;
+        sender.faultSnoozedUntilMs = 0U;
+        sender.hasFaultAudioTime = false;
+    }
+}
+
 void DistanceMonitorModule::handleAliveRequest(
     DmNodeState &sender,
     const meshtastic_MeshPacket &mp,
     const DmMessageHeader &,
-    uint32_t)
+    uint32_t nowMs)
 {
     if (mp.decoded.payload.size < DM_ALIVE_SIZE)
-    {
         return;
-    }
 
     const uint8_t *payload = mp.decoded.payload.bytes;
     const uint32_t sessionId = readU32Le(payload, 8U);
     const uint32_t remoteUptime = readU32Le(payload, 12U);
 
-    if (!sender.hasRemoteSession ||
-        sender.remoteSessionId != sessionId)
-    {
-        sender.paired = false;
-        sender.hasRemoteUptime = false;
-        sender.hasRemoteSession = true;
-        sender.remoteSessionId = sessionId;
-    }
+    noteRemoteSession(sender, sessionId, nowMs);
     sender.remoteUptimeSeconds = remoteUptime;
     sender.hasRemoteUptime = true;
-
     sendAliveResponse(mp.from);
 }
 
@@ -170,38 +218,22 @@ void DistanceMonitorModule::handleAliveResponse(
     DmNodeState &sender,
     const meshtastic_MeshPacket &mp,
     const DmMessageHeader &,
-    uint32_t)
+    uint32_t nowMs)
 {
     if (mp.decoded.payload.size < DM_ALIVE_SIZE)
-    {
         return;
-    }
 
     const uint8_t *payload = mp.decoded.payload.bytes;
     const uint32_t sessionId = readU32Le(payload, 8U);
     const uint32_t remoteUptime = readU32Le(payload, 12U);
 
-    if (!sender.hasRemoteSession ||
-        sender.remoteSessionId != sessionId)
-    {
-        sender.paired = false;
-        sender.hasRemoteUptime = false;
-        sender.hasRemoteSession = true;
-        sender.remoteSessionId = sessionId;
-    }
-
+    noteRemoteSession(sender, sessionId, nowMs);
     sender.remoteUptimeSeconds = remoteUptime;
     sender.hasRemoteUptime = true;
     sender.radioState = DmRadioState::Pairing;
 
-    // ALIVE_RESPONSE completes discovery. Do not make PAIR_CONFIRM wait for
-    // the ALIVE_REQUEST retry timer; the base may confirm as soon as the
-    // configured boot delay has elapsed. Later PAIR_CONFIRM retries still use
-    // DM_HANDSHAKE_RETRY_MS.
     if (!sender.isBase)
-    {
         sender.hasHandshakeTxTime = false;
-    }
 }
 
 void DistanceMonitorModule::handlePairConfirm(
@@ -209,13 +241,10 @@ void DistanceMonitorModule::handlePairConfirm(
     const meshtastic_MeshPacket &mp,
     const DmMessageHeader &,
     bool duplicate,
-    uint32_t)
+    uint32_t nowMs)
 {
-    if (mp.decoded.payload.size < DM_PAIR_CONFIRM_SIZE ||
-        !sender.isBase)
-    {
+    if (mp.decoded.payload.size < DM_PAIR_CONFIRM_SIZE || !sender.isBase)
         return;
-    }
 
     const uint8_t *payload = mp.decoded.payload.bytes;
     const uint32_t baseSessionId = readU32Le(payload, 8U);
@@ -223,29 +252,25 @@ void DistanceMonitorModule::handlePairConfirm(
     const uint8_t flags = payload[16U];
 
     if (trackerSessionId != bootSessionId_)
-    {
         return;
-    }
 
     const bool samePair =
         sender.paired &&
         sender.pairedLocalSessionId == bootSessionId_ &&
         sender.pairedRemoteSessionId == baseSessionId;
 
-    sender.hasRemoteSession = true;
-    sender.remoteSessionId = baseSessionId;
+    noteRemoteSession(sender, baseSessionId, nowMs);
     sender.paired = true;
+    sender.everPaired = true;
     sender.pairedLocalSessionId = bootSessionId_;
     sender.pairedRemoteSessionId = baseSessionId;
     sender.radioState = DmRadioState::Alive;
+    clearUnpairedFault(sender);
 
     if (!duplicate && !samePair &&
         (flags & DM_PAIR_FLAG_PLAY_TRACKER_TONE) != 0U)
-    {
         audio_.playPairingBops();
-    }
 
-    // Send an immediate report so the base can confirm the pairing.
     forcePositionReport_ = true;
 }
 
@@ -256,31 +281,18 @@ void DistanceMonitorModule::handlePositionReport(
     const DmMessageHeader &header,
     uint32_t nowMs)
 {
-    if (mp.decoded.payload.size < DM_POSITION_REPORT_SIZE ||
-        sender.isBase)
-    {
+    if (mp.decoded.payload.size < DM_POSITION_REPORT_SIZE || sender.isBase)
         return;
-    }
 
     const uint8_t *payload = mp.decoded.payload.bytes;
     const uint32_t trackerSessionId = readU32Le(payload, 8U);
     const uint8_t rawKind = payload[12U];
     const uint8_t flags = payload[13U];
 
-    if (rawKind >
-        static_cast<uint8_t>(DmPositionKind::CachedStationary))
-    {
+    if (rawKind > static_cast<uint8_t>(DmPositionKind::CachedStationary))
         return;
-    }
 
-    if (!sender.hasRemoteSession ||
-        sender.remoteSessionId != trackerSessionId)
-    {
-        sender.paired = false;
-        sender.hasRemoteUptime = false;
-        sender.hasRemoteSession = true;
-        sender.remoteSessionId = trackerSessionId;
-    }
+    noteRemoteSession(sender, trackerSessionId, nowMs);
 
     sender.positionKind = static_cast<DmPositionKind>(rawKind);
     sender.appliedIntervalSec = payload[14U];
@@ -297,10 +309,8 @@ void DistanceMonitorModule::handlePositionReport(
     }
     else
     {
-        sender.latitudeI =
-            static_cast<int32_t>(readU32Le(payload, 20U));
-        sender.longitudeI =
-            static_cast<int32_t>(readU32Le(payload, 24U));
+        sender.latitudeI = static_cast<int32_t>(readU32Le(payload, 20U));
+        sender.longitudeI = static_cast<int32_t>(readU32Le(payload, 24U));
     }
 
     sender.remoteBaseRssiValid =
@@ -309,12 +319,9 @@ void DistanceMonitorModule::handlePositionReport(
     {
         sender.remoteBaseRssiMeanDbm =
             static_cast<float>(static_cast<int8_t>(payload[28U]));
-        sender.remoteBaseRssiStdDb =
-            static_cast<float>(payload[29U]);
+        sender.remoteBaseRssiStdDb = static_cast<float>(payload[29U]);
         sender.remoteBaseRssiTrendDbPerSec =
-            static_cast<float>(
-                static_cast<int8_t>(payload[30U])) /
-            10.0F;
+            static_cast<float>(static_cast<int8_t>(payload[30U])) / 10.0F;
     }
 
     sender.lastPositionReportRxMs = nowMs;
@@ -322,7 +329,8 @@ void DistanceMonitorModule::handlePositionReport(
     sender.lastPositionReportSequence = header.sequence;
     sender.radioState = DmRadioState::Alive;
 
-    if (isRadioFault(sender.faultCause))
+    if (isRadioFault(sender.faultCause) &&
+        sender.faultCause != DmFaultCause::Unpaired)
     {
         LOG_INFO(
             "Distance Monitor link recovered: node=!%08lx previous=%s",
@@ -332,30 +340,46 @@ void DistanceMonitorModule::handlePositionReport(
         sender.comSaturationSilentUntilMs = 0U;
         sender.faultSnoozedUntilMs = 0U;
     }
-
     sender.shutdownNoticeReceived = false;
 
     if (isDirectPacket(mp))
     {
-        directInboundRssi_[senderIndex].update(
-            static_cast<float>(mp.rx_rssi),
-            nowMs);
+        const float tbRawDbm = static_cast<float>(mp.rx_rssi);
+        directInboundRssi_[senderIndex].update(tbRawDbm, nowMs);
+
+        if (sender.remoteBaseRssiValid)
+        {
+            LOG_INFO(
+                "Distance Monitor RSSI_SAMPLE: node=!%08lx TB_raw=%.1f TB_filt=%.1f BT_mean=%.1f BT_std=%.1f BT_trend=%.2f",
+                static_cast<unsigned long>(sender.nodeNum),
+                static_cast<double>(tbRawDbm),
+                static_cast<double>(directInboundRssi_[senderIndex].meanDbm()),
+                static_cast<double>(sender.remoteBaseRssiMeanDbm),
+                static_cast<double>(sender.remoteBaseRssiStdDb),
+                static_cast<double>(sender.remoteBaseRssiTrendDbPerSec));
+        }
+        else
+        {
+            LOG_INFO(
+                "Distance Monitor RSSI_SAMPLE: node=!%08lx TB_raw=%.1f TB_filt=%.1f BT_mean=NA BT_std=NA BT_trend=NA",
+                static_cast<unsigned long>(sender.nodeNum),
+                static_cast<double>(tbRawDbm),
+                static_cast<double>(directInboundRssi_[senderIndex].meanDbm()));
+        }
     }
 
-    const bool pairedReport =
-        (flags & DM_POSITION_FLAG_PAIRED) != 0U;
-
+    const bool pairedReport = (flags & DM_POSITION_FLAG_PAIRED) != 0U;
     if (pairedReport &&
         !sender.paired &&
         sender.pairedLocalSessionId == bootSessionId_ &&
         sender.pairedRemoteSessionId == trackerSessionId)
     {
         sender.paired = true;
+        sender.everPaired = true;
+        clearUnpairedFault(sender);
         audio_.playPairingBops();
-
-        LOG_INFO(
-            "Distance Monitor paired: node=!%08lx",
-            static_cast<unsigned long>(sender.nodeNum));
+        LOG_INFO("Distance Monitor paired: node=!%08lx",
+                 static_cast<unsigned long>(sender.nodeNum));
     }
 
     LOG_DEBUG(
@@ -410,29 +434,14 @@ void DistanceMonitorModule::handleBaseBeacon(
     const meshtastic_MeshPacket &mp,
     uint32_t nowMs)
 {
-    if (mp.decoded.payload.size < DM_BASE_BEACON_SIZE ||
-        !sender.isBase)
-    {
+    if (mp.decoded.payload.size < DM_BASE_BEACON_SIZE || !sender.isBase)
         return;
-    }
 
-    const uint32_t baseSessionId =
-        readU32Le(mp.decoded.payload.bytes, 8U);
-
-    if (!sender.hasRemoteSession ||
-        sender.remoteSessionId != baseSessionId)
-    {
-        sender.paired = false;
-        sender.hasRemoteSession = true;
-        sender.remoteSessionId = baseSessionId;
-    }
+    const uint32_t baseSessionId = readU32Le(mp.decoded.payload.bytes, 8U);
+    noteRemoteSession(sender, baseSessionId, nowMs);
 
     if (isDirectPacket(mp))
-    {
-        baseBeaconRssi_.update(
-            static_cast<float>(mp.rx_rssi),
-            nowMs);
-    }
+        baseBeaconRssi_.update(static_cast<float>(mp.rx_rssi), nowMs);
 }
 
 void DistanceMonitorModule::handleSos(
@@ -473,7 +482,6 @@ void DistanceMonitorModule::handleSos(
     sender.activeSosCause =
         static_cast<DmSosCause>(rawCause);
 
-    // The application ACK is sent only after the local alarm tone is active.
     if (audio_.startSos())
     {
         sendSosAck(
@@ -527,35 +535,18 @@ void DistanceMonitorModule::handleNotification(
     const meshtastic_MeshPacket &mp,
     const DmMessageHeader &header,
     bool duplicate,
-    uint32_t)
+    uint32_t nowMs)
 {
-    if (mp.decoded.payload.size < DM_NOTIFICATION_SIZE ||
-        !sender.isBase)
-    {
+    if (mp.decoded.payload.size < DM_NOTIFICATION_SIZE || !sender.isBase)
         return;
-    }
 
-    const uint32_t baseSessionId =
-        readU32Le(mp.decoded.payload.bytes, 8U);
-
-    if (!sender.hasRemoteSession ||
-        sender.remoteSessionId != baseSessionId)
-    {
-        sender.paired = false;
-        sender.hasRemoteSession = true;
-        sender.remoteSessionId = baseSessionId;
-    }
+    const uint32_t baseSessionId = readU32Le(mp.decoded.payload.bytes, 8U);
+    noteRemoteSession(sender, baseSessionId, nowMs);
 
     if (!duplicate)
-    {
         audio_.playTrackerNotification();
-    }
 
-    // Duplicate notifications are not replayed, but are ACKed again.
-    sendNotificationAck(
-        sender.nodeNum,
-        header.sequence,
-        bootSessionId_);
+    sendNotificationAck(sender.nodeNum, header.sequence, bootSessionId_);
 }
 
 void DistanceMonitorModule::handleNotificationAck(
@@ -587,23 +578,97 @@ void DistanceMonitorModule::handleShutdownNotice(
     const meshtastic_MeshPacket &mp,
     uint32_t nowMs)
 {
-    if (mp.decoded.payload.size < DM_SHUTDOWN_NOTICE_SIZE ||
-        sender.isBase)
+    if (mp.decoded.payload.size < DM_SHUTDOWN_NOTICE_SIZE || sender.isBase)
+        return;
+
+    const uint32_t trackerSessionId = readU32Le(mp.decoded.payload.bytes, 8U);
+    noteRemoteSession(sender, trackerSessionId, nowMs);
+    sender.shutdownNoticeReceived = true;
+    sender.shutdownNoticeMs = nowMs;
+
+    LOG_WARN("Distance Monitor shutdown notice: node=!%08lx",
+             static_cast<unsigned long>(sender.nodeNum));
+}
+
+void DistanceMonitorModule::handleSearchStart(
+    size_t,
+    DmNodeState &sender,
+    const meshtastic_MeshPacket &mp,
+    uint32_t nowMs)
+{
+    size_t localIndex = 0U;
+    if (!findLocalIndex(localIndex) ||
+        nodeStates_[localIndex].isBase ||
+        !sender.isBase ||
+        !sender.paired ||
+        !isDirectPacket(mp))
     {
         return;
     }
 
-    const uint32_t trackerSessionId =
-        readU32Le(mp.decoded.payload.bytes, 8U);
+    trackerSearchActive_ = true;
+    trackerSearchBaseNode_ = sender.nodeNum;
+    trackerSearchLeaseUntilMs_ = nowMs + DM_SEARCH_TRACKER_LEASE_MS;
 
-    sender.hasRemoteSession = true;
-    sender.remoteSessionId = trackerSessionId;
-    sender.shutdownNoticeReceived = true;
-    sender.shutdownNoticeMs = nowMs;
+    if (!pendingSos_.active && sendSearchBeacon(sender.nodeNum))
+    {
+        lastTrackerSearchBeaconTxMs_ = nowMs;
+        hasTrackerSearchBeaconTxTime_ = true;
+    }
+}
 
-    LOG_WARN(
-        "Distance Monitor shutdown notice: node=!%08lx",
-        static_cast<unsigned long>(sender.nodeNum));
+void DistanceMonitorModule::handleSearchBeacon(
+    size_t senderIndex,
+    DmNodeState &sender,
+    const meshtastic_MeshPacket &mp,
+    uint32_t nowMs)
+{
+    size_t localIndex = 0U;
+    if (!findLocalIndex(localIndex) ||
+        !nodeStates_[localIndex].isBase ||
+        sender.isBase ||
+        !sender.paired ||
+        !searchModeActive_ ||
+        senderIndex != searchTargetIndex_ ||
+        !isDirectPacket(mp))
+    {
+        return;
+    }
+
+    updateSearchRssi(static_cast<float>(mp.rx_rssi), nowMs);
+    sender.radioState = DmRadioState::Alive;
+    sender.faultCause = DmFaultCause::None;
+
+    LOG_DEBUG(
+        "Distance Monitor SEARCH RSSI: node=!%08lx raw=%d filt=%.1f trend=%.2f",
+        static_cast<unsigned long>(sender.nodeNum),
+        static_cast<int>(mp.rx_rssi),
+        static_cast<double>(searchFilteredDbm_),
+        static_cast<double>(searchTrendDbPerSec_));
+}
+
+void DistanceMonitorModule::handleSearchStop(
+    size_t,
+    DmNodeState &sender,
+    const meshtastic_MeshPacket &mp,
+    uint32_t)
+{
+    size_t localIndex = 0U;
+    if (!findLocalIndex(localIndex) ||
+        nodeStates_[localIndex].isBase ||
+        !sender.isBase ||
+        !sender.paired ||
+        !isDirectPacket(mp) ||
+        !trackerSearchActive_ ||
+        trackerSearchBaseNode_ != sender.nodeNum)
+    {
+        return;
+    }
+
+    trackerSearchActive_ = false;
+    trackerSearchBaseNode_ = 0U;
+    hasTrackerSearchBeaconTxTime_ = false;
+    forcePositionReport_ = true;
 }
 
 bool DistanceMonitorModule::sendAliveRequest(uint32_t target)
@@ -757,7 +822,6 @@ bool DistanceMonitorModule::sendSetPositionInterval(
     writeU32Le(body, 0U, trackerSessionId);
     body[4U] = intervalSec;
 
-    // There is deliberately no ACK. The next report carries appliedIntervalSec.
     return sendPacket(
         target,
         DmMessageType::SetPositionInterval,
@@ -857,6 +921,42 @@ bool DistanceMonitorModule::sendShutdownNotice(uint32_t target)
         false);
 }
 
+bool DistanceMonitorModule::sendSearchStart(uint32_t target)
+{
+    return sendPacket(
+        target,
+        DmMessageType::SearchStart,
+        allocateSequenceNumber(),
+        nullptr,
+        0U,
+        false,
+        false);
+}
+
+bool DistanceMonitorModule::sendSearchBeacon(uint32_t target)
+{
+    return sendPacket(
+        target,
+        DmMessageType::SearchBeacon,
+        allocateSequenceNumber(),
+        nullptr,
+        0U,
+        false,
+        false);
+}
+
+bool DistanceMonitorModule::sendSearchStop(uint32_t target)
+{
+    return sendPacket(
+        target,
+        DmMessageType::SearchStop,
+        allocateSequenceNumber(),
+        nullptr,
+        0U,
+        false,
+        false);
+}
+
 bool DistanceMonitorModule::sendPacket(
     uint32_t target,
     DmMessageType type,
@@ -912,8 +1012,6 @@ bool DistanceMonitorModule::sendPacket(
     packet->decoded.want_response = false;
     packet->want_ack = wantAck;
 
-    // Distance Monitor is a direct-link protocol. Prevent relaying so RSSI
-    // statistics stay meaningful and DM traffic does not flood the mesh.
     packet->hop_limit = 0U;
 
     if (reliable)

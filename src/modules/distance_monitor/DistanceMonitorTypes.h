@@ -45,6 +45,7 @@ enum class DmFaultCause : uint8_t
     RadioComSaturation,
     RadioUnexpectedLoss,
     RemoteShutdown,
+    Unpaired,
     DistanceEstimateUnavailable,
 };
 
@@ -68,6 +69,9 @@ enum class DmMessageType : uint8_t
     Notification = 9,
     NotificationAck = 10,
     ShutdownNotice = 11,
+    SearchStart = 12,
+    SearchBeacon = 13,
+    SearchStop = 14,
 };
 
 enum DmPositionReportFlags : uint8_t
@@ -139,6 +143,7 @@ struct DmNodeState
     bool hasRemoteSession = false;
 
     bool paired = false;
+    bool everPaired = false;
     uint32_t pairedLocalSessionId = 0U;
     uint32_t pairedRemoteSessionId = 0U;
     uint32_t lastHandshakeTxMs = 0U;
@@ -152,6 +157,9 @@ struct DmNodeState
     uint32_t lastIntervalEvaluationSequence = 0U;
     bool hasPositionReportRxTime = false;
     DmRadioState radioState = DmRadioState::Unknown;
+
+    uint32_t lastLinkProbeMs = 0U;
+    bool hasLinkProbeTime = false;
 
     DmFaultCause faultCause = DmFaultCause::None;
     uint32_t faultStartedMs = 0U;

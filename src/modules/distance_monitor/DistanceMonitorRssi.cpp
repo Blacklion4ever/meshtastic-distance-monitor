@@ -19,6 +19,37 @@ float gaussianLikelihood(float sample, float mean, float stdDev)
     const float z = (sample - mean) / sigma;
     return std::exp(-0.5F * z * z) / sigma;
 }
+
+float freshnessWeight(uint32_t ageMs, bool moving)
+{
+    const float tau = moving
+                          ? static_cast<float>(DM_RSSI_MOVING_FRESHNESS_MS)
+                          : static_cast<float>(DM_RSSI_STATIONARY_FRESHNESS_MS);
+    return std::exp(-static_cast<float>(ageMs) / std::max(tau, 1.0F));
+}
+
+float directionQuality(uint32_t ageMs, float stdDb, bool moving)
+{
+    const float sigma = clampStd(stdDb);
+    return freshnessWeight(ageMs, moving) / (sigma * sigma);
+}
+
+float binCenter(const DmRssiCalibrationBin &bin)
+{
+    if (bin.maxDistanceM >= DM_RSSI_OPEN_BIN_MAX_M)
+    {
+        return bin.minDistanceM + 60.0F;
+    }
+    return 0.5F * (bin.minDistanceM + bin.maxDistanceM);
+}
+
+DmDistanceBand bandFromDistance(float distanceMeters)
+{
+    const float ratio = DM_MAX_DISTANCE_M > 0.0F
+                            ? distanceMeters / DM_MAX_DISTANCE_M
+                            : 0.0F;
+    return dmDistanceBandFromRatio(ratio);
+}
 } // namespace
 
 void DmRssiFilter::reset()
@@ -27,12 +58,15 @@ void DmRssiFilter::reset()
     sampleCount_ = 0U;
     lastUpdateMs_ = 0U;
     meanDbm_ = 0.0F;
+    lastSampleDbm_ = 0.0F;
     varianceDb2_ = 0.0F;
     trendDbPerSec_ = 0.0F;
 }
 
 void DmRssiFilter::update(float sampleDbm, uint32_t nowMs)
 {
+    lastSampleDbm_ = sampleDbm;
+
     if (!initialized_)
     {
         initialized_ = true;
@@ -84,11 +118,11 @@ void DmOnlineStats::reset()
     m2_ = 0.0F;
 }
 
-void DmOnlineStats::seed(float mean, float stdDev, uint32_t count)
+void DmOnlineStats::restore(uint32_t count, float mean, float m2)
 {
-    count_ = std::max<uint32_t>(count, 2U);
-    mean_ = mean;
-    m2_ = stdDev * stdDev * static_cast<float>(count_ - 1U);
+    count_ = count;
+    mean_ = count > 0U ? mean : 0.0F;
+    m2_ = count > 1U ? std::max(m2, 0.0F) : 0.0F;
 }
 
 void DmOnlineStats::update(float value)
@@ -109,127 +143,272 @@ float DmOnlineStats::stdDev() const
     return std::sqrt(std::max(m2_ / static_cast<float>(count_ - 1U), 0.0F));
 }
 
-DmRssiCalibration::DmRssiCalibration()
+DmRssiCalibrationProfile::DmRssiCalibrationProfile()
 {
     reset();
 }
 
-void DmRssiCalibration::reset()
+void DmRssiCalibrationProfile::reset()
 {
-    buckets_[0].seed(
-        DM_RSSI_BOOTSTRAP_NEAR_MEAN_DBM,
-        DM_RSSI_BOOTSTRAP_STD_DB,
-        DM_RSSI_CALIBRATION_PRIOR_COUNT);
-    buckets_[1].seed(
-        DM_RSSI_BOOTSTRAP_MID_MEAN_DBM,
-        DM_RSSI_BOOTSTRAP_STD_DB,
-        DM_RSSI_CALIBRATION_PRIOR_COUNT);
-    buckets_[2].seed(
-        DM_RSSI_BOOTSTRAP_WARNING_MEAN_DBM,
-        DM_RSSI_BOOTSTRAP_STD_DB,
-        DM_RSSI_CALIBRATION_PRIOR_COUNT);
-    buckets_[3].seed(
-        DM_RSSI_BOOTSTRAP_BEYOND_MEAN_DBM,
-        DM_RSSI_BOOTSTRAP_STD_DB,
-        DM_RSSI_CALIBRATION_PRIOR_COUNT);
+    static constexpr float edges[DM_RSSI_CALIBRATION_BIN_COUNT + 1U] = {
+        0.0F, 15.0F, 30.0F, 60.0F, 80.0F, 100.0F, 120.0F, 180.0F, DM_RSSI_OPEN_BIN_MAX_M};
+
+    for (size_t i = 0U; i < DM_RSSI_CALIBRATION_BIN_COUNT; ++i)
+    {
+        bins_[i] = DmRssiCalibrationBin{};
+        bins_[i].minDistanceM = edges[i];
+        bins_[i].maxDistanceM = edges[i + 1U];
+    }
+
+    bestBaseToTrackerValid_ = false;
+    bestTrackerToBaseValid_ = false;
+    bestBaseToTrackerDbm_ = 0.0F;
+    bestTrackerToBaseDbm_ = 0.0F;
 }
 
-int DmRssiCalibration::bandIndex(DmDistanceBand band)
+int DmRssiCalibrationProfile::findBin(float distanceMeters) const
 {
-    switch (band)
+    if (!std::isfinite(distanceMeters) || distanceMeters < 0.0F)
     {
-    case DmDistanceBand::Near:
-        return 0;
-    case DmDistanceBand::Mid:
-        return 1;
-    case DmDistanceBand::Warning:
-        return 2;
-    case DmDistanceBand::Beyond:
-        return 3;
-    case DmDistanceBand::Unknown:
-    default:
         return -1;
     }
-}
 
-void DmRssiCalibration::update(DmDistanceBand band, float fusedRssiDbm)
-{
-    const int index = bandIndex(band);
-    if (index >= 0)
+    for (size_t i = 0U; i < DM_RSSI_CALIBRATION_BIN_COUNT; ++i)
     {
-        buckets_[index].update(fusedRssiDbm);
+        if (distanceMeters >= bins_[i].minDistanceM &&
+            distanceMeters < bins_[i].maxDistanceM)
+        {
+            return static_cast<int>(i);
+        }
     }
+    return static_cast<int>(DM_RSSI_CALIBRATION_BIN_COUNT - 1U);
 }
 
-DmDistanceBandEstimate DmRssiCalibration::estimate(
-    float fusedRssiDbm,
+bool DmRssiCalibrationProfile::update(float distanceMeters,
+                                      bool baseToTrackerValid,
+                                      float baseToTrackerDbm,
+                                      bool trackerToBaseValid,
+                                      float trackerToBaseDbm)
+{
+    const int index = findBin(distanceMeters);
+    if (index < 0)
+    {
+        return false;
+    }
+
+    bool changed = false;
+    DmRssiCalibrationBin &target = bins_[static_cast<size_t>(index)];
+    if (baseToTrackerValid && std::isfinite(baseToTrackerDbm))
+    {
+        target.baseToTracker.update(baseToTrackerDbm);
+        changed = true;
+    }
+    if (trackerToBaseValid && std::isfinite(trackerToBaseDbm))
+    {
+        target.trackerToBase.update(trackerToBaseDbm);
+        changed = true;
+    }
+
+    changed = observeSignal(baseToTrackerValid, baseToTrackerDbm,
+                            trackerToBaseValid, trackerToBaseDbm) || changed;
+    return changed;
+}
+
+bool DmRssiCalibrationProfile::observeSignal(bool baseToTrackerValid,
+                                             float baseToTrackerDbm,
+                                             bool trackerToBaseValid,
+                                             float trackerToBaseDbm)
+{
+    bool changed = false;
+    if (baseToTrackerValid && std::isfinite(baseToTrackerDbm) &&
+        (!bestBaseToTrackerValid_ || baseToTrackerDbm > bestBaseToTrackerDbm_))
+    {
+        bestBaseToTrackerValid_ = true;
+        bestBaseToTrackerDbm_ = baseToTrackerDbm;
+        changed = true;
+    }
+
+    if (trackerToBaseValid && std::isfinite(trackerToBaseDbm) &&
+        (!bestTrackerToBaseValid_ || trackerToBaseDbm > bestTrackerToBaseDbm_))
+    {
+        bestTrackerToBaseValid_ = true;
+        bestTrackerToBaseDbm_ = trackerToBaseDbm;
+        changed = true;
+    }
+    return changed;
+}
+
+void DmRssiCalibrationProfile::restoreBest(bool btValid, float btDbm,
+                                           bool tbValid, float tbDbm)
+{
+    bestBaseToTrackerValid_ = btValid;
+    bestBaseToTrackerDbm_ = btDbm;
+    bestTrackerToBaseValid_ = tbValid;
+    bestTrackerToBaseDbm_ = tbDbm;
+}
+
+uint32_t DmRssiCalibrationProfile::totalSamples() const
+{
+    uint32_t total = 0U;
+    for (size_t i = 0U; i < DM_RSSI_CALIBRATION_BIN_COUNT; ++i)
+    {
+        total += bins_[i].baseToTracker.count();
+        total += bins_[i].trackerToBase.count();
+    }
+    return total;
+}
+
+bool DmRssiCalibrationProfile::hasSafetyCoverage() const
+{
+    bool hasSafe = false;
+    bool hasAlert = false;
+    for (size_t i = 0U; i < DM_RSSI_CALIBRATION_BIN_COUNT; ++i)
+    {
+        const DmRssiCalibrationBin &b = bins_[i];
+        const bool usable = b.baseToTracker.count() >= DM_RSSI_TABLE_MIN_BIN_SAMPLES ||
+                            b.trackerToBase.count() >= DM_RSSI_TABLE_MIN_BIN_SAMPLES;
+        if (!usable)
+        {
+            continue;
+        }
+        if (b.maxDistanceM <= DM_MAX_DISTANCE_M * DM_DISTANCE_ALERT_START_RATIO)
+        {
+            hasSafe = true;
+        }
+        if (b.minDistanceM >= DM_MAX_DISTANCE_M * DM_DISTANCE_ALERT_START_RATIO)
+        {
+            hasAlert = true;
+        }
+    }
+    return hasSafe && hasAlert;
+}
+
+DmRssiTableEstimate DmRssiCalibrationProfile::estimate(
+    bool baseToTrackerValid,
+    float baseToTrackerDbm,
+    float baseToTrackerStdDb,
+    uint32_t baseToTrackerAgeMs,
+    bool trackerToBaseValid,
+    float trackerToBaseDbm,
+    float trackerToBaseStdDb,
+    uint32_t trackerToBaseAgeMs,
     float fusedTrendDbPerSec,
     bool moving) const
 {
-    DmDistanceBandEstimate result;
-    result.fusedRssiDbm = fusedRssiDbm;
-    result.fusedTrendDbPerSec = fusedTrendDbPerSec;
+    DmRssiTableEstimate out;
+    out.fusedTrendDbPerSec = fusedTrendDbPerSec;
 
-    const float motionConfidence = moving ? DM_RSSI_MOVING_CONFIDENCE : 1.0F;
+    const float btQuality = baseToTrackerValid
+                                ? directionQuality(baseToTrackerAgeMs, baseToTrackerStdDb, moving)
+                                : 0.0F;
+    const float tbQuality = trackerToBaseValid
+                                ? directionQuality(trackerToBaseAgeMs, trackerToBaseStdDb, moving)
+                                : 0.0F;
+    const float qualitySum = btQuality + tbQuality;
+    if (qualitySum <= 0.0F)
+    {
+        return out;
+    }
+
+    out.fusedRssiDbm =
+        (btQuality * baseToTrackerDbm + tbQuality * trackerToBaseDbm) / qualitySum;
+
+    // SEARCH proximity is based on path loss relative to the strongest signal
+    // actually observed in each direction. This removes fixed BT/TB asymmetry.
+    float lossWeighted = 0.0F;
+    float lossWeight = 0.0F;
+    if (baseToTrackerValid && bestBaseToTrackerValid_)
+    {
+        lossWeighted += btQuality * std::max(0.0F, bestBaseToTrackerDbm_ - baseToTrackerDbm);
+        lossWeight += btQuality;
+    }
+    if (trackerToBaseValid && bestTrackerToBaseValid_)
+    {
+        lossWeighted += tbQuality * std::max(0.0F, bestTrackerToBaseDbm_ - trackerToBaseDbm);
+        lossWeight += tbQuality;
+    }
+    if (lossWeight > 0.0F)
+    {
+        const float pathLoss = lossWeighted / lossWeight;
+        out.proximity = std::max(0.0F,
+                                 std::min(1.0F, 1.0F - pathLoss / DM_SEARCH_PATHLOSS_SPAN_DB));
+    }
+
+    float probabilities[DM_RSSI_CALIBRATION_BIN_COUNT] = {};
     float sum = 0.0F;
-    for (size_t index = 0U; index < 4U; ++index)
+    size_t usableBins = 0U;
+
+    for (size_t i = 0U; i < DM_RSSI_CALIBRATION_BIN_COUNT; ++i)
     {
-        const float effectiveStd =
-            clampStd(buckets_[index].stdDev()) / motionConfidence;
-        result.probabilities[index] =
-            gaussianLikelihood(fusedRssiDbm, buckets_[index].mean(), effectiveStd);
-        sum += result.probabilities[index];
+        const DmRssiCalibrationBin &b = bins_[i];
+        float logLikelihood = 0.0F;
+        float usedWeight = 0.0F;
+
+        if (baseToTrackerValid && b.baseToTracker.count() >= DM_RSSI_TABLE_MIN_BIN_SAMPLES)
+        {
+            const float sigma = std::max(clampStd(b.baseToTracker.stdDev()),
+                                         clampStd(baseToTrackerStdDb));
+            const float likelihood = std::max(
+                gaussianLikelihood(baseToTrackerDbm, b.baseToTracker.mean(), sigma), 1.0e-12F);
+            logLikelihood += (btQuality / qualitySum) * std::log(likelihood);
+            usedWeight += btQuality / qualitySum;
+        }
+
+        if (trackerToBaseValid && b.trackerToBase.count() >= DM_RSSI_TABLE_MIN_BIN_SAMPLES)
+        {
+            const float sigma = std::max(clampStd(b.trackerToBase.stdDev()),
+                                         clampStd(trackerToBaseStdDb));
+            const float likelihood = std::max(
+                gaussianLikelihood(trackerToBaseDbm, b.trackerToBase.mean(), sigma), 1.0e-12F);
+            logLikelihood += (tbQuality / qualitySum) * std::log(likelihood);
+            usedWeight += tbQuality / qualitySum;
+        }
+
+        if (usedWeight <= 0.0F)
+        {
+            continue;
+        }
+
+        // Normalize if only one direction had calibration for this bin.
+        probabilities[i] = std::exp(logLikelihood / usedWeight);
+        sum += probabilities[i];
+        ++usableBins;
     }
 
-    if (sum <= 0.0F)
+    if (sum <= 0.0F || usableBins < 2U)
     {
-        return result;
-    }
-
-    for (float &probability : result.probabilities)
-    {
-        probability /= sum;
+        return out;
     }
 
     size_t bestIndex = 0U;
-    size_t secondIndex = 1U;
-    if (result.probabilities[secondIndex] > result.probabilities[bestIndex])
-    {
-        std::swap(bestIndex, secondIndex);
-    }
+    float best = 0.0F;
+    float alertProbability = 0.0F;
+    const float alertDistance = DM_MAX_DISTANCE_M * DM_DISTANCE_ALERT_START_RATIO;
 
-    for (size_t index = 2U; index < 4U; ++index)
+    for (size_t i = 0U; i < DM_RSSI_CALIBRATION_BIN_COUNT; ++i)
     {
-        if (result.probabilities[index] > result.probabilities[bestIndex])
+        probabilities[i] /= sum;
+        if (probabilities[i] > best)
         {
-            secondIndex = bestIndex;
-            bestIndex = index;
+            best = probabilities[i];
+            bestIndex = i;
         }
-        else if (result.probabilities[index] > result.probabilities[secondIndex])
+        if (bins_[i].minDistanceM >= alertDistance)
         {
-            secondIndex = index;
+            alertProbability += probabilities[i];
         }
     }
 
-    const float best = result.probabilities[bestIndex];
-    const float second = result.probabilities[secondIndex];
-    result.confidence = best;
+    out.calibrated = true;
+    out.confidence = best;
+    out.alertProbability = alertProbability;
+    out.band = bandFromDistance(binCenter(bins_[bestIndex]));
 
-    if (best < DM_RSSI_MIN_CONFIDENCE ||
-        (best - second) < DM_RSSI_MIN_MARGIN)
-    {
-        result.band = DmDistanceBand::Unknown;
-        return result;
-    }
-
-    static constexpr DmDistanceBand bands[4] = {
-        DmDistanceBand::Near,
-        DmDistanceBand::Mid,
-        DmDistanceBand::Warning,
-        DmDistanceBand::Beyond,
-    };
-    result.band = bands[bestIndex];
-    return result;
+    // Safety policy: RSSI can raise a distance alarm only on positive evidence.
+    // Uncalibrated/ambiguous states are deliberately silent.
+    out.positiveAlert = hasSafetyCoverage() &&
+                        alertProbability >= DM_RSSI_ALERT_PROBABILITY;
+    return out;
 }
 
 float dmFuseRssi(float baseToTrackerDbm, float trackerToBaseDbm)
@@ -237,9 +416,8 @@ float dmFuseRssi(float baseToTrackerDbm, float trackerToBaseDbm)
     return 0.5F * baseToTrackerDbm + 0.5F * trackerToBaseDbm;
 }
 
-float dmFuseRssiTrend(
-    float baseToTrackerTrendDbPerSec,
-    float trackerToBaseTrendDbPerSec)
+float dmFuseRssiTrend(float baseToTrackerTrendDbPerSec,
+                      float trackerToBaseTrendDbPerSec)
 {
     return 0.5F * baseToTrackerTrendDbPerSec +
            0.5F * trackerToBaseTrendDbPerSec;
@@ -260,4 +438,11 @@ DmDistanceBand dmDistanceBandFromRatio(float ratio)
         return DmDistanceBand::Warning;
     }
     return DmDistanceBand::Beyond;
+}
+
+const char *dmRssiBinLabel(size_t index)
+{
+    static constexpr const char *labels[DM_RSSI_CALIBRATION_BIN_COUNT] = {
+        "0-15", "15-30", "30-60", "60-80", "80-100", "100-120", "120-180", "180+"};
+    return index < DM_RSSI_CALIBRATION_BIN_COUNT ? labels[index] : "?";
 }

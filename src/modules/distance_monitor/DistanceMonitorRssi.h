@@ -16,6 +16,7 @@ class DmRssiFilter
     uint32_t sampleCount() const { return sampleCount_; }
     uint32_t lastUpdateMs() const { return lastUpdateMs_; }
     float meanDbm() const { return meanDbm_; }
+    float lastSampleDbm() const { return lastSampleDbm_; }
     float stdDb() const;
     float trendDbPerSec() const { return trendDbPerSec_; }
 
@@ -24,6 +25,7 @@ class DmRssiFilter
     uint32_t sampleCount_ = 0U;
     uint32_t lastUpdateMs_ = 0U;
     float meanDbm_ = 0.0F;
+    float lastSampleDbm_ = 0.0F;
     float varianceDb2_ = 0.0F;
     float trendDbPerSec_ = 0.0F;
 };
@@ -32,11 +34,12 @@ class DmOnlineStats
 {
   public:
     void reset();
-    void seed(float mean, float stdDev, uint32_t count);
+    void restore(uint32_t count, float mean, float m2);
     void update(float value);
 
     uint32_t count() const { return count_; }
     float mean() const { return mean_; }
+    float m2() const { return m2_; }
     float stdDev() const;
 
   private:
@@ -45,24 +48,79 @@ class DmOnlineStats
     float m2_ = 0.0F;
 };
 
-class DmRssiCalibration
+struct DmRssiCalibrationBin
+{
+    float minDistanceM = 0.0F;
+    float maxDistanceM = 0.0F;
+    DmOnlineStats baseToTracker;
+    DmOnlineStats trackerToBase;
+};
+
+struct DmRssiTableEstimate
+{
+    DmDistanceBand band = DmDistanceBand::Unknown;
+    float confidence = 0.0F;
+    float alertProbability = 0.0F;
+    float fusedRssiDbm = 0.0F;
+    float fusedTrendDbPerSec = 0.0F;
+    float proximity = 0.0F;
+    bool calibrated = false;
+    bool positiveAlert = false;
+};
+
+class DmRssiCalibrationProfile
 {
   public:
-    DmRssiCalibration();
+    DmRssiCalibrationProfile();
 
     void reset();
-    void update(DmDistanceBand band, float fusedRssiDbm);
-    DmDistanceBandEstimate estimate(
-        float fusedRssiDbm,
+    bool update(float distanceMeters,
+                bool baseToTrackerValid,
+                float baseToTrackerDbm,
+                bool trackerToBaseValid,
+                float trackerToBaseDbm);
+
+    bool observeSignal(bool baseToTrackerValid,
+                       float baseToTrackerDbm,
+                       bool trackerToBaseValid,
+                       float trackerToBaseDbm);
+
+    DmRssiTableEstimate estimate(
+        bool baseToTrackerValid,
+        float baseToTrackerDbm,
+        float baseToTrackerStdDb,
+        uint32_t baseToTrackerAgeMs,
+        bool trackerToBaseValid,
+        float trackerToBaseDbm,
+        float trackerToBaseStdDb,
+        uint32_t trackerToBaseAgeMs,
         float fusedTrendDbPerSec,
         bool moving) const;
 
-  private:
-    DmOnlineStats buckets_[4];
+    size_t binCount() const { return DM_RSSI_CALIBRATION_BIN_COUNT; }
+    const DmRssiCalibrationBin &bin(size_t index) const { return bins_[index]; }
+    DmRssiCalibrationBin &bin(size_t index) { return bins_[index]; }
 
-    static int bandIndex(DmDistanceBand band);
+    bool bestBaseToTrackerValid() const { return bestBaseToTrackerValid_; }
+    bool bestTrackerToBaseValid() const { return bestTrackerToBaseValid_; }
+    float bestBaseToTrackerDbm() const { return bestBaseToTrackerDbm_; }
+    float bestTrackerToBaseDbm() const { return bestTrackerToBaseDbm_; }
+    void restoreBest(bool btValid, float btDbm, bool tbValid, float tbDbm);
+
+    uint32_t totalSamples() const;
+    bool hasSafetyCoverage() const;
+
+  private:
+    DmRssiCalibrationBin bins_[DM_RSSI_CALIBRATION_BIN_COUNT] = {};
+    bool bestBaseToTrackerValid_ = false;
+    bool bestTrackerToBaseValid_ = false;
+    float bestBaseToTrackerDbm_ = 0.0F;
+    float bestTrackerToBaseDbm_ = 0.0F;
+
+    int findBin(float distanceMeters) const;
 };
 
 float dmFuseRssi(float baseToTrackerDbm, float trackerToBaseDbm);
 float dmFuseRssiTrend(float baseToTrackerTrendDbPerSec, float trackerToBaseTrendDbPerSec);
 DmDistanceBand dmDistanceBandFromRatio(float ratio);
+const char *dmRssiBinLabel(size_t index);

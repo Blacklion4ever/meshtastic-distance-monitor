@@ -303,24 +303,33 @@ void DistanceMonitorModule::updateHighSpeedDetection(
     uint32_t nowMs,
     float dynamicAccelerationMps2)
 {
+    // IMU runs at 25 Hz in beta3. It only opens a temporary high-speed GPS
+    // watch; GPS ground speed remains the final authority for vehicle SOS.
     if (dynamicAccelerationMps2 > DM_VEHICLE_ACCEL_THRESHOLD_MPS2)
     {
-        if (vehicleAccelConsecutiveSamples_ < 255U)
+        if (vehicleAccelAboveSinceMs_ == 0U)
         {
-            ++vehicleAccelConsecutiveSamples_;
+            vehicleAccelAboveSinceMs_ = nowMs;
+        }
+        else if (dmElapsedMs(nowMs, vehicleAccelAboveSinceMs_) >=
+                 DM_VEHICLE_ACCEL_CONFIRM_MS)
+        {
+            if (highSpeedWatchUntilMs_ == 0U)
+            {
+                LOG_INFO(
+                    "Distance Monitor vehicle watch: IMU activity %.2fm/s2 for %lums",
+                    static_cast<double>(dynamicAccelerationMps2),
+                    static_cast<unsigned long>(
+                        dmElapsedMs(nowMs, vehicleAccelAboveSinceMs_)));
+            }
+            highSpeedWatchUntilMs_ = nowMs + DM_HIGH_SPEED_WATCH_HOLD_MS;
+            vehicleAccelAboveSinceMs_ = 0U;
+            wakeGps(DM_HIGH_SPEED_GPS_INTERVAL_S);
         }
     }
     else
     {
-        vehicleAccelConsecutiveSamples_ = 0U;
-    }
-
-    if (vehicleAccelConsecutiveSamples_ >=
-        DM_VEHICLE_ACCEL_CONFIRM_SAMPLES)
-    {
-        highSpeedWatchUntilMs_ = nowMs + DM_HIGH_SPEED_WATCH_HOLD_MS;
-        vehicleAccelConsecutiveSamples_ = 0U;
-        wakeGps(DM_HIGH_SPEED_GPS_INTERVAL_S);
+        vehicleAccelAboveSinceMs_ = 0U;
     }
 
     if (highSpeedWatchUntilMs_ != 0U &&
@@ -334,19 +343,28 @@ void DistanceMonitorModule::updateFallDetection(
     uint32_t nowMs,
     float rawNormG)
 {
+    // IMPORTANT: rawNormG is the raw accelerometer norm. The gravity low-pass
+    // used for motion/vehicle detection does not filter this fall detector.
     if (!fallFreefallArmed_)
     {
         if (rawNormG < DM_FALL_FREEFALL_THRESHOLD_G)
         {
             fallFreefallArmed_ = true;
             fallFreefallMs_ = nowMs;
+            LOG_INFO(
+                "Distance Monitor fall candidate: low_g=%.2f",
+                static_cast<double>(rawNormG));
         }
         return;
     }
 
-    if (dmElapsedMs(nowMs, fallFreefallMs_) >
-        DM_FALL_IMPACT_WINDOW_MS)
+    const uint32_t elapsed = dmElapsedMs(nowMs, fallFreefallMs_);
+    if (elapsed > DM_FALL_IMPACT_WINDOW_MS)
     {
+        LOG_DEBUG(
+            "Distance Monitor fall candidate expired: dt=%lums last=%.2fg",
+            static_cast<unsigned long>(elapsed),
+            static_cast<double>(rawNormG));
         fallFreefallArmed_ = false;
         return;
     }
@@ -354,11 +372,15 @@ void DistanceMonitorModule::updateFallDetection(
     if (rawNormG > DM_FALL_IMPACT_THRESHOLD_G)
     {
         fallFreefallArmed_ = false;
+        LOG_WARN(
+            "Distance Monitor fall detected: impact=%.2fg dt=%lums",
+            static_cast<double>(rawNormG),
+            static_cast<unsigned long>(elapsed));
         triggerLocalSos(DmSosCause::FallDetected);
     }
 }
 
-void DistanceMonitorModule::updateLocalPosition(
+void DistanceMonitorModule::sampleLocalImu(
     DmNodeState &localState,
     uint32_t nowMs)
 {
@@ -371,56 +393,59 @@ void DistanceMonitorModule::updateLocalPosition(
         dynamicAccelerationMps2,
         rawNormG);
 
-    if (imuOk)
-    {
-        if (!imuAvailable_)
-        {
-            LOG_INFO("Distance Monitor IMU: ready");
-        }
-        imuAvailable_ = true;
-        imuWarningLogged_ = false;
-
-        updateHighSpeedDetection(nowMs, dynamicAccelerationMps2);
-        if (!localState.isBase)
-        {
-            updateFallDetection(nowMs, rawNormG);
-        }
-    }
-    else
+    if (!imuOk)
     {
         if (imuAvailable_ || !imuWarningLogged_)
         {
             LOG_WARN("Distance Monitor IMU: unavailable; GPS stays active");
         }
-
         imuAvailable_ = false;
         imuWarningLogged_ = true;
         gravityReferenceValid_ = false;
         localMoving_ = true;
-
+        localState.moving = true;
         if (localPositionKind_ == DmPositionKind::CachedStationary)
         {
             localPositionKind_ = DmPositionKind::NoFix;
         }
+        return;
     }
+
+    if (!imuAvailable_)
+    {
+        LOG_INFO("Distance Monitor IMU: ready (25Hz sampler)");
+    }
+    imuAvailable_ = true;
+    imuWarningLogged_ = false;
 
     if (motionDetected)
     {
         lastMotionMs_ = nowMs;
         localMoving_ = true;
-
         if (localPositionKind_ == DmPositionKind::CachedStationary)
         {
             localPositionKind_ = DmPositionKind::NoFix;
         }
     }
-    else if (imuAvailable_ &&
-             dmElapsedMs(nowMs, lastMotionMs_) >=
-                 DM_STATIONARY_CONFIRM_MS)
+    else if (dmElapsedMs(nowMs, lastMotionMs_) >= DM_STATIONARY_CONFIRM_MS)
     {
         localMoving_ = false;
     }
+    localState.moving = localMoving_;
 
+    updateHighSpeedDetection(nowMs, dynamicAccelerationMps2);
+    if (!localState.isBase)
+    {
+        updateFallDetection(nowMs, rawNormG);
+    }
+}
+
+void DistanceMonitorModule::updateLocalPosition(
+    DmNodeState &localState,
+    uint32_t nowMs)
+{
+    // IMU is sampled by runOnce() every DM_TICK_INTERVAL_MS. This 1 Hz control
+    // path owns only GNSS power/state transitions.
     uint8_t gpsInterval = localDesiredGpsIntervalSec_;
     if (highSpeedWatchUntilMs_ != 0U)
     {
@@ -444,15 +469,12 @@ void DistanceMonitorModule::updateLocalPosition(
         {
             localPositionKind_ = DmPositionKind::CachedStationary;
             sleepGps();
-            LOG_INFO(
-                "Distance Monitor position: FRESH -> CACHED_STATIONARY");
+            LOG_INFO("Distance Monitor position: FRESH -> CACHED_STATIONARY");
         }
-        else if (localFixAgeSeconds(nowMs) >=
-                 freshFixMaxAgeSeconds())
+        else if (localFixAgeSeconds(nowMs) >= freshFixMaxAgeSeconds())
         {
             localPositionKind_ = DmPositionKind::NoFix;
-            LOG_INFO(
-                "Distance Monitor position: FRESH -> NO_FIX (stale)");
+            LOG_INFO("Distance Monitor position: FRESH -> NO_FIX (stale)");
         }
     }
 

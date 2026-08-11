@@ -40,7 +40,7 @@ uint8_t quantizeOddDown(float seconds)
     value = std::min<int>(value, DM_MAX_REPORT_INTERVAL_CAP_S);
     return static_cast<uint8_t>(value);
 }
-} // namespace
+}
 
 void dmFormatAge(uint32_t totalSeconds, char *buffer, size_t bufferSize)
 {
@@ -319,6 +319,12 @@ const char *dmMessageTypeName(DmMessageType type)
         return "NOTIFICATION_ACK";
     case DmMessageType::ShutdownNotice:
         return "SHUTDOWN_NOTICE";
+    case DmMessageType::SearchStart:
+        return "SEARCH_START";
+    case DmMessageType::SearchBeacon:
+        return "SEARCH_BEACON";
+    case DmMessageType::SearchStop:
+        return "SEARCH_STOP";
     default:
         return "UNKNOWN";
     }

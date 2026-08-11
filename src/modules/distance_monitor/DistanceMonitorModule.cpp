@@ -1,6 +1,8 @@
 #include "DistanceMonitorModule.h"
 
 #include "DistanceMonitorUtils.h"
+#include "FSCommon.h"
+#include "SPILock.h"
 #include "NodeDB.h"
 #include "PowerStatus.h"
 #include "configuration.h"
@@ -9,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 DistanceMonitorModule *distanceMonitorModule = nullptr;
 
@@ -18,6 +21,59 @@ bool deadlinePending(uint32_t nowMs, uint32_t deadlineMs)
 {
     return deadlineMs != 0U &&
            static_cast<int32_t>(nowMs - deadlineMs) < 0;
+}
+
+static constexpr uint32_t DM_RSSI_FILE_MAGIC = 0x52525344U;
+static constexpr uint16_t DM_RSSI_FILE_VERSION = 1U;
+
+struct DmRssiPersistStats
+{
+    uint32_t count;
+    float mean;
+    float m2;
+};
+
+struct DmRssiPersistBin
+{
+    DmRssiPersistStats bt;
+    DmRssiPersistStats tb;
+};
+
+struct DmRssiPersistRecord
+{
+    uint32_t magic;
+    uint16_t version;
+    uint16_t binCount;
+    uint32_t nodeNum;
+    uint32_t generation;
+    uint8_t flags;
+    uint8_t reserved[3];
+    float bestBtDbm;
+    float bestTbDbm;
+    DmRssiPersistBin bins[DM_RSSI_CALIBRATION_BIN_COUNT];
+    uint32_t crc32;
+};
+
+uint32_t dmCrc32(const uint8_t *data, size_t length)
+{
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0U; i < length; ++i)
+    {
+        crc ^= data[i];
+        for (uint8_t bit = 0U; bit < 8U; ++bit)
+        {
+            crc = (crc >> 1U) ^
+                  (0xEDB88320U & static_cast<uint32_t>(
+                       -(static_cast<int32_t>(crc & 1U))));
+        }
+    }
+    return ~crc;
+}
+
+void dmRssiFilePath(char *buffer, size_t size, uint32_t nodeNum, char slot)
+{
+    std::snprintf(buffer, size, "/prefs/dm_rssi_%08lx_%c.bin",
+                  static_cast<unsigned long>(nodeNum), slot);
 }
 
 float effectiveAlertRatioFromBand(DmDistanceBand band)
@@ -35,24 +91,18 @@ float effectiveAlertRatioFromBand(DmDistanceBand band)
         return 0.0F;
     }
 }
-} // namespace
+}
 
 DistanceMonitorModule::DistanceMonitorModule()
     : SinglePortModule("distance_monitor", meshtastic_PortNum_PRIVATE_APP),
       concurrency::OSThread("DistanceMonitor")
 {
     loadDefaultConfiguration();
-
-    // Meshtastic core modules are instantiated from setupModules(), but their
-    // MeshModule::setup() hook is not called automatically. Initialize here so
-    // boot/session/audio state exists before the first packet can be handled.
     initializeIfNeeded();
 }
 
 void DistanceMonitorModule::setup()
 {
-    // Keep this hook for compatibility with integrations that explicitly call
-    // MeshModule::setup(). Initialization is deliberately idempotent.
     initializeIfNeeded();
 }
 
@@ -64,18 +114,10 @@ void DistanceMonitorModule::initializeIfNeeded()
     }
 
     bootMs_ = millis();
+    uint32_t localNodeNum = nodeDB != nullptr ? nodeDB->getNodeNum() : 0U;
 
-    uint32_t localNodeNum = 0U;
-    if (nodeDB != nullptr)
-    {
-        localNodeNum = nodeDB->getNodeNum();
-    }
-
-    bootSessionId_ =
-        static_cast<uint32_t>(micros()) ^
-        (bootMs_ << 11U) ^
-        localNodeNum ^
-        0xD157A9C5U;
+    bootSessionId_ = static_cast<uint32_t>(micros()) ^
+                     (bootMs_ << 11U) ^ localNodeNum ^ 0xD157A9C5U;
     if (bootSessionId_ == 0U)
     {
         bootSessionId_ = 1U;
@@ -91,11 +133,12 @@ void DistanceMonitorModule::initializeIfNeeded()
 
     LOG_INFO(
         "Distance Monitor initialized: firmware=%s protocol=%u members=%u "
-        "tick=%lums dmax=%.1fm report=%u..%us beacon=%lus session=%08lx",
+        "imu=%lums control=%lums dmax=%.1fm report=%u..%us beacon=%lus session=%08lx",
         DM_FIRMWARE_VERSION,
         static_cast<unsigned>(DM_PROTOCOL_VERSION),
         static_cast<unsigned>(runtimeConfig_.memberCount),
         static_cast<unsigned long>(DM_TICK_INTERVAL_MS),
+        static_cast<unsigned long>(DM_CONTROL_INTERVAL_MS),
         static_cast<double>(runtimeConfig_.maxDistanceMeters),
         static_cast<unsigned>(DM_MIN_REPORT_INTERVAL_S),
         static_cast<unsigned>(maximumReport),
@@ -103,12 +146,10 @@ void DistanceMonitorModule::initializeIfNeeded()
         static_cast<unsigned long>(bootSessionId_));
 
     moduleInitialized_ = true;
-
     if (!audio_.isAvailable())
     {
         LOG_ERROR("Distance Monitor initialization failed: buzzer unavailable");
     }
-
     setIntervalFromNow(DM_TICK_INTERVAL_MS);
 }
 
@@ -124,25 +165,41 @@ int32_t DistanceMonitorModule::runOnce()
     size_t localIndex = 0U;
     if (!findLocalIndex(localIndex))
     {
-        LOG_WARN(
-            "Distance Monitor: local node !%08lx is not configured",
-            static_cast<unsigned long>(nodeDB->getNodeNum()));
         return DM_TICK_INTERVAL_MS;
     }
 
     const uint32_t nowMs = millis();
     DmNodeState &localState = nodeStates_[localIndex];
     localState.isLocal = true;
-    localState.batteryPercent = currentBatteryPercent();
 
     if (!localPositionStarted_)
     {
         startLocalPositionManager(nowMs);
     }
+
+    sampleLocalImu(localState, nowMs);
+    if (localState.isBase)
+    {
+        processSearchMode(localIndex, nowMs);
+    }
+    else
+    {
+        processTrackerSearchMode(localIndex, nowMs);
+    }
+
+    if (hasControlTickTime_ &&
+        dmElapsedMs(nowMs, lastControlTickMs_) < DM_CONTROL_INTERVAL_MS)
+    {
+        return DM_TICK_INTERVAL_MS;
+    }
+    lastControlTickMs_ = nowMs;
+    hasControlTickTime_ = true;
+
+    localState.batteryPercent = currentBatteryPercent();
     updateLocalPosition(localState, nowMs);
+    loadRssiCalibrationIfNeeded(localIndex);
 
     processPairing(localIndex, nowMs);
-
     if (localState.isBase)
     {
         processBase(localIndex, nowMs);
@@ -153,8 +210,7 @@ int32_t DistanceMonitorModule::runOnce()
     }
 
     if (!hasSummaryLogTime_ ||
-        dmElapsedMs(nowMs, lastSummaryLogMs_) >=
-            DM_SUMMARY_INTERVAL_MS)
+        dmElapsedMs(nowMs, lastSummaryLogMs_) >= DM_SUMMARY_INTERVAL_MS)
     {
         lastSummaryLogMs_ = nowMs;
         hasSummaryLogTime_ = true;
@@ -192,22 +248,17 @@ void DistanceMonitorModule::loadDefaultConfiguration()
 
 void DistanceMonitorModule::applyRuntimeProfile()
 {
-    // Keep standard Meshtastic feedback from competing with Distance Monitor tones.
-    config.device.role =
-        meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE;
-    config.device.buzzer_mode =
-        meshtastic_Config_DeviceConfig_BuzzerMode_DISABLED;
+    config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE;
+    config.device.buzzer_mode = meshtastic_Config_DeviceConfig_BuzzerMode_DISABLED;
     config.device.disable_triple_click = true;
     config.device.led_heartbeat_disabled = false;
 
-    // Native position broadcasts are reduced; Distance Monitor owns its private reports.
     config.position.position_broadcast_smart_enabled = false;
-    config.position.position_broadcast_secs =
-        DM_GPS_SLEEP_UPDATE_INTERVAL_S;
+    config.position.position_broadcast_secs = DM_GPS_SLEEP_UPDATE_INTERVAL_S;
 
-    // These are runtime-only changes. The user's persistent configuration is not rewritten.
     moduleConfig.telemetry.device_telemetry_enabled = false;
     moduleConfig.mqtt.enabled = false;
+
     moduleConfig.external_notification.enabled = false;
 }
 
@@ -336,7 +387,7 @@ void DistanceMonitorModule::processPairing(
                 remote.remoteSessionId,
                 trackerJustBooted))
         {
-            // Expected session IDs are stored before confirmation arrives.
+
             remote.pairedLocalSessionId = bootSessionId_;
             remote.pairedRemoteSessionId = remote.remoteSessionId;
             remote.lastHandshakeTxMs = nowMs;
@@ -360,13 +411,10 @@ void DistanceMonitorModule::processBase(
         }
     }
 
-    // RSSI beacons are useful background traffic, but never compete with an
-    // active SOS. At the default radio preset a beacon occupies substantial
-    // airtime, so the normal cadence is intentionally conservative.
-    if (!hasActiveSos &&
+    if (!searchModeActive_ &&
+        !hasActiveSos &&
         (!hasBaseBeaconTxTime_ ||
-         dmElapsedMs(nowMs, lastBaseBeaconTxMs_) >=
-             DM_BASE_BEACON_INTERVAL_MS))
+         dmElapsedMs(nowMs, lastBaseBeaconTxMs_) >= DM_BASE_BEACON_INTERVAL_MS))
     {
         if (sendBaseBeacon())
         {
@@ -375,16 +423,10 @@ void DistanceMonitorModule::processBase(
         }
     }
 
-    for (size_t remoteIndex = 0U;
-         remoteIndex < runtimeConfig_.memberCount;
-         ++remoteIndex)
+    for (size_t remoteIndex = 0U; remoteIndex < runtimeConfig_.memberCount; ++remoteIndex)
     {
-        if (remoteIndex == localIndex ||
-            nodeStates_[remoteIndex].isBase)
-        {
+        if (remoteIndex == localIndex || nodeStates_[remoteIndex].isBase)
             continue;
-        }
-
         processRemoteMember(localIndex, remoteIndex, nowMs);
     }
 
@@ -403,28 +445,30 @@ void DistanceMonitorModule::processTracker(
         return;
     }
 
-    const uint32_t reportPeriodMs =
-        static_cast<uint32_t>(
-            std::max<uint8_t>(
-                localAppliedIntervalSec_,
-                DM_MIN_REPORT_INTERVAL_S)) *
-        1000U;
-
-    if (forcePositionReport_ ||
-        !hasPositionReportTxTime_ ||
-        dmElapsedMs(nowMs, lastPositionReportTxMs_) >=
-            reportPeriodMs)
+    if (!trackerSearchActive_)
     {
-        size_t localIndex = 0U;
-        if (findLocalIndex(localIndex) &&
-            sendPositionReport(
-                runtimeConfig_.members[baseIndex].nodeNum,
-                nodeStates_[localIndex],
-                nowMs))
+        const uint32_t reportPeriodMs =
+            static_cast<uint32_t>(
+                std::max<uint8_t>(
+                    localAppliedIntervalSec_,
+                    DM_MIN_REPORT_INTERVAL_S)) *
+            1000U;
+
+        if (forcePositionReport_ ||
+            !hasPositionReportTxTime_ ||
+            dmElapsedMs(nowMs, lastPositionReportTxMs_) >= reportPeriodMs)
         {
-            lastPositionReportTxMs_ = nowMs;
-            hasPositionReportTxTime_ = true;
-            forcePositionReport_ = false;
+            size_t localIndex = 0U;
+            if (findLocalIndex(localIndex) &&
+                sendPositionReport(
+                    runtimeConfig_.members[baseIndex].nodeNum,
+                    nodeStates_[localIndex],
+                    nowMs))
+            {
+                lastPositionReportTxMs_ = nowMs;
+                hasPositionReportTxTime_ = true;
+                forcePositionReport_ = false;
+            }
         }
     }
 
@@ -447,7 +491,6 @@ void DistanceMonitorModule::processRemoteMember(
 
     evaluateRemoteDistance(localIndex, remoteIndex, nowMs);
 
-    // Interval commands are evaluated only when a new report is received.
     if (remote.lastPositionReportSequence == 0U ||
         remote.lastIntervalEvaluationSequence ==
             remote.lastPositionReportSequence)
@@ -508,13 +551,20 @@ void DistanceMonitorModule::processLinkState(
     uint32_t nowMs)
 {
     DmNodeState &remote = nodeStates_[remoteIndex];
-    if (!remote.hasPositionReportRxTime)
+    const bool useSearchTraffic =
+        searchModeActive_ &&
+        remoteIndex == searchTargetIndex_ &&
+        remote.hasAnyPacketRxTime;
+
+    if (!useSearchTraffic && !remote.hasPositionReportRxTime)
     {
         return;
     }
 
-    const uint32_t ageMs =
-        dmElapsedMs(nowMs, remote.lastPositionReportRxMs);
+    const uint32_t lastRxMs = useSearchTraffic
+                                  ? remote.lastAnyPacketRxMs
+                                  : remote.lastPositionReportRxMs;
+    const uint32_t ageMs = dmElapsedMs(nowMs, lastRxMs);
     const uint32_t timeoutMs = linkTimeoutMs();
     const uint32_t suspectMs =
         timeoutMs > DM_LINK_TIMEOUT_MARGIN_MS
@@ -540,22 +590,18 @@ void DistanceMonitorModule::processLinkState(
 
         if (!isRadioFault(remote.faultCause))
         {
-            remote.faultCause =
-                diagnoseRadioLoss(remoteIndex);
+            remote.faultCause = diagnoseRadioLoss(remoteIndex);
             remote.faultStartedMs = nowMs;
             remote.hasFaultAudioTime = false;
 
-            if (remote.faultCause ==
-                DmFaultCause::RadioComSaturation)
+            if (remote.faultCause == DmFaultCause::RadioComSaturation)
             {
                 remote.comSaturationSilentUntilMs =
-                    nowMs +
-                    DM_COM_SATURATION_SILENT_MS;
+                    nowMs + DM_COM_SATURATION_SILENT_MS;
             }
 
             LOG_WARN(
-                "Distance Monitor link lost: node=!%08lx cause=%s "
-                "age=%lus last_ratio=%.2f battery=%u",
+                "Distance Monitor link lost: node=!%08lx cause=%s age=%lus last_ratio=%.2f battery=%u",
                 static_cast<unsigned long>(remote.nodeNum),
                 dmFaultCauseName(remote.faultCause),
                 static_cast<unsigned long>(ageMs / 1000U),
@@ -563,10 +609,6 @@ void DistanceMonitorModule::processLinkState(
                 static_cast<unsigned>(remote.batteryPercent));
         }
     }
-
-    // A live tracker publishes POSITION_REPORT even with NO_FIX, so recovery
-    // is detected passively by the next report. Probing a bad link would only
-    // add traffic and can keep a congested radio in a failure loop.
 }
 
 void DistanceMonitorModule::processPendingSos(uint32_t nowMs)
@@ -716,16 +758,12 @@ void DistanceMonitorModule::evaluateRemoteDistance(
         updateRssiCalibration(
             remoteIndex,
             remote,
-            remote.lastValidDistanceRatio,
+            static_cast<float>(remote.lastValidDistanceMeters),
             nowMs);
         return;
     }
 
-    evaluateRssiDistance(
-        local,
-        remoteIndex,
-        remote,
-        nowMs);
+    evaluateRssiDistance(local, remoteIndex, remote, nowMs);
 }
 
 bool DistanceMonitorModule::evaluateGpsDistance(
@@ -774,93 +812,116 @@ bool DistanceMonitorModule::evaluateGpsDistance(
     return true;
 }
 
+DmRssiTableEstimate DistanceMonitorModule::currentRssiEstimate(
+    size_t remoteIndex,
+    const DmNodeState &remoteState,
+    const DmNodeState &localState,
+    uint32_t nowMs) const
+{
+    const DmRssiFilter &trackerToBase = directInboundRssi_[remoteIndex];
+
+    const bool btValid = remoteState.remoteBaseRssiValid;
+    const uint32_t btAgeMs = remoteState.hasPositionReportRxTime
+                                 ? dmElapsedMs(nowMs, remoteState.lastPositionReportRxMs)
+                                 : UINT32_MAX;
+
+    const bool tbValid = trackerToBase.isInitialized() &&
+                         dmElapsedMs(nowMs, trackerToBase.lastUpdateMs()) <= linkTimeoutMs();
+    const uint32_t tbAgeMs = tbValid
+                                 ? dmElapsedMs(nowMs, trackerToBase.lastUpdateMs())
+                                 : UINT32_MAX;
+
+    float trend = 0.0F;
+    if (btValid && tbValid)
+    {
+        const float btQ = 1.0F / std::max(
+            remoteState.remoteBaseRssiStdDb * remoteState.remoteBaseRssiStdDb, 1.0F);
+        const float tbQ = 1.0F / std::max(
+            trackerToBase.stdDb() * trackerToBase.stdDb(), 1.0F);
+        trend = (btQ * remoteState.remoteBaseRssiTrendDbPerSec +
+                 tbQ * trackerToBase.trendDbPerSec()) /
+                (btQ + tbQ);
+    }
+    else if (btValid)
+        trend = remoteState.remoteBaseRssiTrendDbPerSec;
+    else if (tbValid)
+        trend = trackerToBase.trendDbPerSec();
+
+    return rssiProfiles_[remoteIndex].estimate(
+        btValid,
+        remoteState.remoteBaseRssiMeanDbm,
+        std::max(remoteState.remoteBaseRssiStdDb, DM_RSSI_MIN_STD_DB),
+        btAgeMs,
+        tbValid,
+        trackerToBase.meanDbm(),
+        std::max(trackerToBase.stdDb(), DM_RSSI_MIN_STD_DB),
+        tbAgeMs,
+        trend,
+        localState.moving || remoteState.moving);
+}
+
 bool DistanceMonitorModule::evaluateRssiDistance(
     const DmNodeState &localState,
     size_t remoteIndex,
     DmNodeState &remoteState,
     uint32_t nowMs)
 {
-    const DmRssiFilter &trackerToBase =
-        directInboundRssi_[remoteIndex];
+    const DmRssiFilter &trackerToBase = directInboundRssi_[remoteIndex];
+    const bool btValid = remoteState.remoteBaseRssiValid;
+    const bool tbValid = trackerToBase.isUsable(nowMs, linkTimeoutMs());
 
-    if (!remoteState.remoteBaseRssiValid ||
-        !trackerToBase.isUsable(nowMs, linkTimeoutMs()))
+    if (!btValid && !tbValid)
     {
-        const bool wasFaulted =
-            remoteState.distanceEstimateFault;
-
-        remoteState.distanceSource =
-            DmDistanceSource::None;
-        remoteState.rssiEstimate =
-            DmDistanceBandEstimate{};
-        remoteState.distanceEstimateFault = true;
-        remoteState.currentDistanceAlertRatio = 0.0F;
-
-        if (!wasFaulted)
-        {
-            remoteState.hasFaultAudioTime = false;
-            LOG_WARN(
-                "Distance Monitor fallback unavailable: node=!%08lx "
-                "reason=RSSI_DATA_UNAVAILABLE",
-                static_cast<unsigned long>(remoteState.nodeNum));
-        }
+        remoteState.distanceSource = DmDistanceSource::None;
+        remoteState.rssiEstimate = DmDistanceBandEstimate{};
+        remoteState.distanceEstimateFault = false;
+        updateDistanceAlertState(remoteState, 0.0F);
         return false;
     }
 
-    const float fusedRssi = dmFuseRssi(
-        remoteState.remoteBaseRssiMeanDbm,
-        trackerToBase.meanDbm());
-    const float fusedTrend = dmFuseRssiTrend(
-        remoteState.remoteBaseRssiTrendDbPerSec,
-        trackerToBase.trendDbPerSec());
-    const bool moving =
-        localState.moving || remoteState.moving;
+    if (!searchModeActive_ &&
+        rssiProfiles_[remoteIndex].observeSignal(
+            btValid,
+            remoteState.remoteBaseRssiMeanDbm,
+            tbValid,
+            trackerToBase.lastSampleDbm()))
+    {
+        rssiCalibrationDirty_[remoteIndex] = true;
+    }
 
-    const DmDistanceBandEstimate estimate =
-        rssiCalibration_.estimate(
-            fusedRssi,
-            fusedTrend,
-            moving);
+    const DmRssiTableEstimate table =
+        currentRssiEstimate(remoteIndex, remoteState, localState, nowMs);
 
     remoteState.distanceSource = DmDistanceSource::Rssi;
     remoteState.distanceMeters = 0.0;
     remoteState.distanceRatio = 0.0F;
-    remoteState.rssiEstimate = estimate;
+    remoteState.distanceEstimateFault = false;
+    remoteState.rssiEstimate = DmDistanceBandEstimate{};
+    remoteState.rssiEstimate.band = table.band;
+    remoteState.rssiEstimate.confidence = table.confidence;
+    remoteState.rssiEstimate.fusedRssiDbm = table.fusedRssiDbm;
+    remoteState.rssiEstimate.fusedTrendDbPerSec = table.fusedTrendDbPerSec;
 
-    if (estimate.band == DmDistanceBand::Unknown)
+    if (!table.calibrated || table.band == DmDistanceBand::Unknown)
     {
-        const bool wasFaulted =
-            remoteState.distanceEstimateFault;
-
-        remoteState.distanceEstimateFault = true;
-        remoteState.currentDistanceAlertRatio = 0.0F;
-
-        if (!wasFaulted)
-        {
-            remoteState.hasFaultAudioTime = false;
-            LOG_WARN(
-                "Distance Monitor fallback UNKNOWN: node=!%08lx "
-                "rssi=%.1f trend=%.2f confidence=%.2f",
-                static_cast<unsigned long>(remoteState.nodeNum),
-                static_cast<double>(estimate.fusedRssiDbm),
-                static_cast<double>(estimate.fusedTrendDbPerSec),
-                static_cast<double>(estimate.confidence));
-        }
+        updateDistanceAlertState(remoteState, 0.0F);
         return false;
     }
 
-    if (remoteState.distanceEstimateFault)
+    if (table.positiveAlert)
     {
-        LOG_INFO(
-            "Distance Monitor fallback recovered: node=!%08lx band=%s",
+        const float ratio = table.band == DmDistanceBand::Beyond ? 1.0F : 0.80F;
+        LOG_WARN(
+            "Distance Monitor RSSI positive alert: node=!%08lx band=%s conf=%.2f p_alert=%.2f",
             static_cast<unsigned long>(remoteState.nodeNum),
-            dmDistanceBandName(estimate.band));
+            dmDistanceBandName(table.band),
+            static_cast<double>(table.confidence),
+            static_cast<double>(table.alertProbability));
+        updateDistanceAlertState(remoteState, ratio);
+        return true;
     }
 
-    remoteState.distanceEstimateFault = false;
-    updateDistanceAlertState(
-        remoteState,
-        effectiveAlertRatioFromBand(estimate.band));
+    updateDistanceAlertState(remoteState, 0.0F);
     return true;
 }
 
@@ -890,7 +951,7 @@ void DistanceMonitorModule::updateDistanceAlertState(
         else if (currentRatio <
                  DM_DISTANCE_ALERT_START_RATIO)
         {
-            // A fresh GPS distance below 80% is reliable enough to clear the latch.
+
             remoteState.criticalDistanceLatch = false;
             remoteState.criticalDistanceLatchRatio = 0.0F;
         }
@@ -899,7 +960,6 @@ void DistanceMonitorModule::updateDistanceAlertState(
     float active =
         remoteState.currentDistanceAlertRatio;
 
-    // If GPS previously crossed Dmax, a weaker RSSI fallback cannot silently clear it.
     if (remoteState.criticalDistanceLatch &&
         remoteState.distanceSource !=
             DmDistanceSource::Gps &&
@@ -924,26 +984,37 @@ void DistanceMonitorModule::updateDistanceAlertState(
 void DistanceMonitorModule::updateRssiCalibration(
     size_t remoteIndex,
     DmNodeState &remoteState,
-    float distanceRatio,
+    float distanceMeters,
     uint32_t nowMs)
 {
-    const DmRssiFilter &trackerToBase =
-        directInboundRssi_[remoteIndex];
 
-    if (!remoteState.remoteBaseRssiValid ||
-        !trackerToBase.isUsable(nowMs, linkTimeoutMs()))
+    if (searchModeActive_ ||
+        remoteIndex >= runtimeConfig_.memberCount ||
+        remoteState.lastPositionReportSequence == 0U ||
+        lastCalibrationSequence_[remoteIndex] == remoteState.lastPositionReportSequence)
     {
         return;
     }
 
-    const float fusedRssi =
-        dmFuseRssi(
-            remoteState.remoteBaseRssiMeanDbm,
-            trackerToBase.meanDbm());
+    const DmRssiFilter &trackerToBase = directInboundRssi_[remoteIndex];
+    const bool btValid = remoteState.remoteBaseRssiValid;
+    const bool tbValid = trackerToBase.isUsable(nowMs, linkTimeoutMs());
 
-    rssiCalibration_.update(
-        dmDistanceBandFromRatio(distanceRatio),
-        fusedRssi);
+    if (!btValid && !tbValid)
+    {
+        return;
+    }
+
+    if (rssiProfiles_[remoteIndex].update(
+            distanceMeters,
+            btValid,
+            remoteState.remoteBaseRssiMeanDbm,
+            tbValid,
+            trackerToBase.lastSampleDbm()))
+    {
+        lastCalibrationSequence_[remoteIndex] = remoteState.lastPositionReportSequence;
+        rssiCalibrationDirty_[remoteIndex] = true;
+    }
 }
 
 DmFaultCause DistanceMonitorModule::diagnoseRadioLoss(
@@ -1015,6 +1086,7 @@ bool DistanceMonitorModule::isRadioFault(
     case DmFaultCause::RadioComSaturation:
     case DmFaultCause::RadioUnexpectedLoss:
     case DmFaultCause::RemoteShutdown:
+    case DmFaultCause::Unpaired:
         return true;
     case DmFaultCause::DistanceEstimateUnavailable:
     case DmFaultCause::None:
@@ -1027,31 +1099,19 @@ bool DistanceMonitorModule::isFaultAudible(
     const DmNodeState &state,
     uint32_t nowMs) const
 {
-    const bool hasRadioFault =
-        isRadioFault(state.faultCause);
-
-    if (!hasRadioFault &&
-        !state.distanceEstimateFault)
+    if (!isRadioFault(state.faultCause))
     {
         return false;
     }
-
-    if (deadlinePending(
-            nowMs,
-            state.faultSnoozedUntilMs))
+    if (deadlinePending(nowMs, state.faultSnoozedUntilMs))
     {
         return false;
     }
-
-    if (state.faultCause ==
-            DmFaultCause::RadioComSaturation &&
-        deadlinePending(
-            nowMs,
-            state.comSaturationSilentUntilMs))
+    if (state.faultCause == DmFaultCause::RadioComSaturation &&
+        deadlinePending(nowMs, state.comSaturationSilentUntilMs))
     {
         return false;
     }
-
     return true;
 }
 
@@ -1212,6 +1272,434 @@ void DistanceMonitorModule::updateBaseAudio(
     }
 }
 
+void DistanceMonitorModule::logRssiCalibrationTable(size_t memberIndex) const
+{
+    if (memberIndex >= runtimeConfig_.memberCount || nodeStates_[memberIndex].isBase)
+        return;
+
+    const DmRssiCalibrationProfile &profile = rssiProfiles_[memberIndex];
+    LOG_INFO("RSSI calibration: node=!%08lx samples=%lu bestBT=%s%.1f bestTB=%s%.1f",
+             static_cast<unsigned long>(nodeStates_[memberIndex].nodeNum),
+             static_cast<unsigned long>(profile.totalSamples()),
+             profile.bestBaseToTrackerValid() ? "" : "NA/",
+             static_cast<double>(profile.bestBaseToTrackerDbm()),
+             profile.bestTrackerToBaseValid() ? "" : "NA/",
+             static_cast<double>(profile.bestTrackerToBaseDbm()));
+    LOG_INFO("RSSI calibration table: range(m) | BT mean std n | TB mean std n");
+
+    for (size_t i = 0U; i < profile.binCount(); ++i)
+    {
+        const DmRssiCalibrationBin &b = profile.bin(i);
+        if (b.baseToTracker.count() > 0U && b.trackerToBase.count() > 0U)
+        {
+            LOG_INFO("RSSI cal %-7s | BT %6.1f %4.1f %lu | TB %6.1f %4.1f %lu",
+                     dmRssiBinLabel(i),
+                     static_cast<double>(b.baseToTracker.mean()),
+                     static_cast<double>(b.baseToTracker.stdDev()),
+                     static_cast<unsigned long>(b.baseToTracker.count()),
+                     static_cast<double>(b.trackerToBase.mean()),
+                     static_cast<double>(b.trackerToBase.stdDev()),
+                     static_cast<unsigned long>(b.trackerToBase.count()));
+        }
+        else if (b.baseToTracker.count() > 0U)
+        {
+            LOG_INFO("RSSI cal %-7s | BT %6.1f %4.1f %lu | TB -- -- 0",
+                     dmRssiBinLabel(i),
+                     static_cast<double>(b.baseToTracker.mean()),
+                     static_cast<double>(b.baseToTracker.stdDev()),
+                     static_cast<unsigned long>(b.baseToTracker.count()));
+        }
+        else if (b.trackerToBase.count() > 0U)
+        {
+            LOG_INFO("RSSI cal %-7s | BT -- -- 0 | TB %6.1f %4.1f %lu",
+                     dmRssiBinLabel(i),
+                     static_cast<double>(b.trackerToBase.mean()),
+                     static_cast<double>(b.trackerToBase.stdDev()),
+                     static_cast<unsigned long>(b.trackerToBase.count()));
+        }
+        else
+        {
+            LOG_INFO("RSSI cal %-7s | BT -- -- 0 | TB -- -- 0", dmRssiBinLabel(i));
+        }
+    }
+}
+
+bool DistanceMonitorModule::loadRssiCalibrationProfile(size_t memberIndex)
+{
+#ifdef FSCom
+    if (memberIndex >= runtimeConfig_.memberCount || nodeStates_[memberIndex].isBase)
+        return false;
+
+    const uint32_t nodeNum = nodeStates_[memberIndex].nodeNum;
+    DmRssiPersistRecord best = {};
+    bool haveBest = false;
+
+    for (const char slot : {'a', 'b'})
+    {
+        char path[64] = {};
+        dmRssiFilePath(path, sizeof(path), nodeNum, slot);
+        DmRssiPersistRecord candidate = {};
+        bool readOk = false;
+        {
+            concurrency::LockGuard g(spiLock);
+            File f = FSCom.open(path, FILE_O_READ);
+            if (f)
+            {
+                readOk = f.read(reinterpret_cast<uint8_t *>(&candidate), sizeof(candidate)) == sizeof(candidate);
+                f.close();
+            }
+        }
+        if (!readOk)
+            continue;
+
+        const uint32_t storedCrc = candidate.crc32;
+        candidate.crc32 = 0U;
+        const uint32_t computedCrc = dmCrc32(
+            reinterpret_cast<const uint8_t *>(&candidate), sizeof(candidate));
+        candidate.crc32 = storedCrc;
+
+        const bool valid = candidate.magic == DM_RSSI_FILE_MAGIC &&
+                           candidate.version == DM_RSSI_FILE_VERSION &&
+                           candidate.binCount == DM_RSSI_CALIBRATION_BIN_COUNT &&
+                           candidate.nodeNum == nodeNum &&
+                           storedCrc == computedCrc;
+        if (valid && (!haveBest || candidate.generation > best.generation))
+        {
+            best = candidate;
+            haveBest = true;
+        }
+    }
+
+    if (!haveBest)
+    {
+        rssiProfiles_[memberIndex].reset();
+        rssiCalibrationGeneration_[memberIndex] = 0U;
+        rssiCalibrationSavedSamples_[memberIndex] = 0U;
+        LOG_INFO("RSSI calibration: node=!%08lx no valid flash table; starting empty",
+                 static_cast<unsigned long>(nodeNum));
+        return false;
+    }
+
+    DmRssiCalibrationProfile &profile = rssiProfiles_[memberIndex];
+    profile.reset();
+    profile.restoreBest(
+        (best.flags & 0x01U) != 0U, best.bestBtDbm,
+        (best.flags & 0x02U) != 0U, best.bestTbDbm);
+
+    for (size_t i = 0U; i < DM_RSSI_CALIBRATION_BIN_COUNT; ++i)
+    {
+        profile.bin(i).baseToTracker.restore(
+            best.bins[i].bt.count, best.bins[i].bt.mean, best.bins[i].bt.m2);
+        profile.bin(i).trackerToBase.restore(
+            best.bins[i].tb.count, best.bins[i].tb.mean, best.bins[i].tb.m2);
+    }
+
+    rssiCalibrationGeneration_[memberIndex] = best.generation;
+    rssiCalibrationSavedSamples_[memberIndex] = profile.totalSamples();
+    LOG_INFO("RSSI calibration loaded: node=!%08lx generation=%lu samples=%lu",
+             static_cast<unsigned long>(nodeNum),
+             static_cast<unsigned long>(best.generation),
+             static_cast<unsigned long>(profile.totalSamples()));
+    return true;
+#else
+    (void)memberIndex;
+    return false;
+#endif
+}
+
+bool DistanceMonitorModule::saveRssiCalibrationProfile(size_t memberIndex)
+{
+#ifdef FSCom
+    if (memberIndex >= runtimeConfig_.memberCount || nodeStates_[memberIndex].isBase)
+        return false;
+
+    DmRssiPersistRecord record = {};
+    record.magic = DM_RSSI_FILE_MAGIC;
+    record.version = DM_RSSI_FILE_VERSION;
+    record.binCount = DM_RSSI_CALIBRATION_BIN_COUNT;
+    record.nodeNum = nodeStates_[memberIndex].nodeNum;
+    record.generation = rssiCalibrationGeneration_[memberIndex] + 1U;
+
+    const DmRssiCalibrationProfile &profile = rssiProfiles_[memberIndex];
+    if (profile.bestBaseToTrackerValid())
+    {
+        record.flags |= 0x01U;
+        record.bestBtDbm = profile.bestBaseToTrackerDbm();
+    }
+    if (profile.bestTrackerToBaseValid())
+    {
+        record.flags |= 0x02U;
+        record.bestTbDbm = profile.bestTrackerToBaseDbm();
+    }
+
+    for (size_t i = 0U; i < DM_RSSI_CALIBRATION_BIN_COUNT; ++i)
+    {
+        const DmRssiCalibrationBin &b = profile.bin(i);
+        record.bins[i].bt = {b.baseToTracker.count(), b.baseToTracker.mean(), b.baseToTracker.m2()};
+        record.bins[i].tb = {b.trackerToBase.count(), b.trackerToBase.mean(), b.trackerToBase.m2()};
+    }
+
+    record.crc32 = 0U;
+    record.crc32 = dmCrc32(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
+
+    const char slot = (record.generation & 1U) != 0U ? 'a' : 'b';
+    char path[64] = {};
+    dmRssiFilePath(path, sizeof(path), record.nodeNum, slot);
+
+    bool ok = false;
+    {
+        concurrency::LockGuard g(spiLock);
+        File f = FSCom.open(path, FILE_O_WRITE);
+        if (f)
+        {
+            ok = f.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record)) == sizeof(record);
+            f.flush();
+            f.close();
+        }
+    }
+
+    if (!ok)
+    {
+        LOG_ERROR("RSSI calibration save failed: node=!%08lx slot=%c",
+                  static_cast<unsigned long>(record.nodeNum), slot);
+        return false;
+    }
+
+    rssiCalibrationGeneration_[memberIndex] = record.generation;
+    rssiCalibrationSavedSamples_[memberIndex] = profile.totalSamples();
+    rssiCalibrationDirty_[memberIndex] = false;
+    LOG_INFO("RSSI calibration saved: node=!%08lx generation=%lu samples=%lu slot=%c",
+             static_cast<unsigned long>(record.nodeNum),
+             static_cast<unsigned long>(record.generation),
+             static_cast<unsigned long>(profile.totalSamples()), slot);
+    return true;
+#else
+    (void)memberIndex;
+    return false;
+#endif
+}
+
+void DistanceMonitorModule::loadRssiCalibrationIfNeeded(size_t localIndex)
+{
+    if (rssiCalibrationLoaded_)
+        return;
+    rssiCalibrationLoaded_ = true;
+
+    if (!nodeStates_[localIndex].isBase)
+        return;
+
+    for (size_t i = 0U; i < runtimeConfig_.memberCount; ++i)
+    {
+        if (i == localIndex || nodeStates_[i].isBase)
+            continue;
+        loadRssiCalibrationProfile(i);
+        logRssiCalibrationTable(i);
+    }
+}
+
+void DistanceMonitorModule::saveAllRssiCalibration(bool force)
+{
+    for (size_t i = 0U; i < runtimeConfig_.memberCount; ++i)
+    {
+        if (nodeStates_[i].isBase)
+            continue;
+        if (force || rssiCalibrationDirty_[i])
+            saveRssiCalibrationProfile(i);
+    }
+}
+
+bool DistanceMonitorModule::isLocalBase() const
+{
+    size_t index = 0U;
+    return findLocalIndex(index) && nodeStates_[index].isBase;
+}
+
+bool DistanceMonitorModule::handleSearchToggle()
+{
+    initializeIfNeeded();
+    size_t localIndex = 0U;
+    if (!findLocalIndex(localIndex) || !nodeStates_[localIndex].isBase)
+        return false;
+
+    if (searchModeActive_)
+    {
+        if (searchTargetIndex_ < runtimeConfig_.memberCount)
+        {
+            sendSearchStop(nodeStates_[searchTargetIndex_].nodeNum);
+            nodeStates_[searchTargetIndex_].lastIntervalEvaluationSequence = 0U;
+        }
+
+        searchModeActive_ = false;
+        audio_.playSearchExit();
+        LOG_INFO("Distance Monitor SEARCH: OFF");
+        searchTargetIndex_ = DM_MAX_MEMBERS;
+        hasSearchPulseTime_ = false;
+        hasSearchStartTxTime_ = false;
+        searchRssiValid_ = false;
+        searchLastSampleMs_ = 0U;
+        searchFilteredDbm_ = 0.0F;
+        searchPreviousFilteredDbm_ = 0.0F;
+        searchTrendDbPerSec_ = 0.0F;
+        return true;
+    }
+
+    size_t target = DM_MAX_MEMBERS;
+    for (size_t i = 0U; i < runtimeConfig_.memberCount; ++i)
+    {
+        if (i != localIndex && !nodeStates_[i].isBase && nodeStates_[i].paired)
+        {
+            target = i;
+            break;
+        }
+    }
+
+    if (target == DM_MAX_MEMBERS)
+    {
+        LOG_WARN("Distance Monitor SEARCH: no paired tracker");
+        return true;
+    }
+
+    searchModeActive_ = true;
+    searchTargetIndex_ = target;
+    hasSearchPulseTime_ = false;
+    hasSearchStartTxTime_ = false;
+    searchRssiValid_ = false;
+    searchLastSampleMs_ = 0U;
+    searchFilteredDbm_ = 0.0F;
+    searchPreviousFilteredDbm_ = 0.0F;
+    searchTrendDbPerSec_ = 0.0F;
+
+    DmNodeState &remote = nodeStates_[target];
+    if (sendSearchStart(remote.nodeNum))
+    {
+        lastSearchStartTxMs_ = millis();
+        hasSearchStartTxTime_ = true;
+    }
+
+    audio_.playSearchEnter();
+    LOG_INFO(
+        "Distance Monitor SEARCH: ON target=!%08lx beacon=%lums span=%.1f..%.1fdBm",
+        static_cast<unsigned long>(remote.nodeNum),
+        static_cast<unsigned long>(DM_SEARCH_BEACON_INTERVAL_MS),
+        static_cast<double>(DM_SEARCH_RSSI_WORST_DBM),
+        static_cast<double>(DM_SEARCH_RSSI_BEST_DBM));
+    return true;
+}
+
+void DistanceMonitorModule::processSearchMode(size_t, uint32_t nowMs)
+{
+    if (!searchModeActive_ || searchTargetIndex_ >= runtimeConfig_.memberCount)
+        return;
+
+    DmNodeState &remote = nodeStates_[searchTargetIndex_];
+    if (!remote.paired || remote.sosActive || audio_.isSosActive())
+        return;
+
+    if (!hasSearchStartTxTime_ ||
+        dmElapsedMs(nowMs, lastSearchStartTxMs_) >= DM_SEARCH_START_REFRESH_MS)
+    {
+        if (sendSearchStart(remote.nodeNum))
+        {
+            lastSearchStartTxMs_ = nowMs;
+            hasSearchStartTxTime_ = true;
+        }
+    }
+
+    if (searchRssiValid_ &&
+        dmElapsedMs(nowMs, searchLastSampleMs_) > DM_SEARCH_BEACON_TIMEOUT_MS)
+    {
+        searchRssiValid_ = false;
+        searchTrendDbPerSec_ = 0.0F;
+    }
+
+    float proximity = 0.0F;
+    if (searchRssiValid_)
+    {
+        const uint32_t ageMs = dmElapsedMs(nowMs, searchLastSampleMs_);
+        const uint32_t interpMs = std::min(ageMs, DM_SEARCH_TREND_INTERPOLATION_MS);
+        float predictedDelta = searchTrendDbPerSec_ *
+                               static_cast<float>(interpMs) / 1000.0F;
+        predictedDelta = std::max(
+            -DM_SEARCH_TREND_INTERPOLATION_CLAMP_DB,
+            std::min(DM_SEARCH_TREND_INTERPOLATION_CLAMP_DB, predictedDelta));
+        const float predictedRssi = searchFilteredDbm_ + predictedDelta;
+        const float denominator = std::max(
+            1.0F, DM_SEARCH_RSSI_BEST_DBM - DM_SEARCH_RSSI_WORST_DBM);
+        proximity = (predictedRssi - DM_SEARCH_RSSI_WORST_DBM) / denominator;
+        proximity = std::max(0.0F, std::min(1.0F, proximity));
+    }
+
+    if ((!hasSearchPulseTime_ ||
+         dmElapsedMs(nowMs, lastSearchPulseMs_) >= DM_SEARCH_PULSE_INTERVAL_MS) &&
+        !audio_.isBusyAboveSearch())
+    {
+        audio_.playSearchPulse(proximity);
+        lastSearchPulseMs_ = nowMs;
+        hasSearchPulseTime_ = true;
+    }
+}
+
+void DistanceMonitorModule::processTrackerSearchMode(size_t, uint32_t nowMs)
+{
+    if (!trackerSearchActive_)
+        return;
+
+    if (static_cast<int32_t>(nowMs - trackerSearchLeaseUntilMs_) >= 0)
+    {
+        trackerSearchActive_ = false;
+        trackerSearchBaseNode_ = 0U;
+        hasTrackerSearchBeaconTxTime_ = false;
+        forcePositionReport_ = true;
+        return;
+    }
+
+    if (pendingSos_.active)
+        return;
+
+    if (!hasTrackerSearchBeaconTxTime_ ||
+        dmElapsedMs(nowMs, lastTrackerSearchBeaconTxMs_) >= DM_SEARCH_BEACON_INTERVAL_MS)
+    {
+        if (sendSearchBeacon(trackerSearchBaseNode_))
+        {
+            lastTrackerSearchBeaconTxMs_ = nowMs;
+            hasTrackerSearchBeaconTxTime_ = true;
+        }
+    }
+}
+
+void DistanceMonitorModule::updateSearchRssi(float rawRssiDbm, uint32_t nowMs)
+{
+    if (!searchRssiValid_)
+    {
+        searchFilteredDbm_ = rawRssiDbm;
+        searchPreviousFilteredDbm_ = rawRssiDbm;
+        searchTrendDbPerSec_ = 0.0F;
+        searchRssiValid_ = true;
+        searchLastSampleMs_ = nowMs;
+        return;
+    }
+
+    const float previous = searchFilteredDbm_;
+    const uint32_t dtMs = dmElapsedMs(nowMs, searchLastSampleMs_);
+    searchPreviousFilteredDbm_ = previous;
+    searchFilteredDbm_ =
+        DM_SEARCH_FILTER_ALPHA * rawRssiDbm +
+        (1.0F - DM_SEARCH_FILTER_ALPHA) * previous;
+
+    if (dtMs > 0U)
+    {
+        searchTrendDbPerSec_ =
+            (searchFilteredDbm_ - previous) * 1000.0F /
+            static_cast<float>(dtMs);
+        searchTrendDbPerSec_ = std::max(
+            -DM_SEARCH_TREND_CLAMP_DB_PER_S,
+            std::min(DM_SEARCH_TREND_CLAMP_DB_PER_S,
+                     searchTrendDbPerSec_));
+    }
+
+    searchLastSampleMs_ = nowMs;
+}
+
 bool DistanceMonitorModule::handleSingleButtonPress()
 {
     initializeIfNeeded();
@@ -1222,7 +1710,6 @@ bool DistanceMonitorModule::handleSingleButtonPress()
         return false;
     }
 
-    // Distance Monitor owns the configured tracker's single press and keeps it silent.
     if (!nodeStates_[localIndex].isBase)
     {
         return true;
@@ -1311,7 +1798,7 @@ bool DistanceMonitorModule::handleSingleButtonPress()
             remote.currentDistanceAlertRatio <
                 DM_DISTANCE_ALERT_START_RATIO)
         {
-            // The only remaining alarm is the remembered GPS >100% state.
+
             remote.criticalDistanceLatch = false;
             remote.criticalDistanceLatchRatio = 0.0F;
             remote.activeDistanceAlertRatio = 0.0F;
@@ -1389,25 +1876,30 @@ uint32_t DistanceMonitorModule::prepareLocalShutdown()
     initializeIfNeeded();
 
     size_t localIndex = 0U;
-    size_t baseIndex = 0U;
-
     if (!findLocalIndex(localIndex))
     {
         return 0U;
     }
 
-    if (nodeStates_[localIndex].isBase ||
-        !findBaseIndex(baseIndex))
+    if (nodeStates_[localIndex].isBase)
+    {
+        if (searchModeActive_ && searchTargetIndex_ < runtimeConfig_.memberCount)
+        {
+            sendSearchStop(nodeStates_[searchTargetIndex_].nodeNum);
+            searchModeActive_ = false;
+        }
+        saveAllRssiCalibration(true);
+        return DM_SHUTDOWN_TX_GRACE_MS;
+    }
+
+    size_t baseIndex = 0U;
+    if (!findBaseIndex(baseIndex))
     {
         return 0U;
     }
 
-    sendShutdownNotice(
-        runtimeConfig_.members[baseIndex].nodeNum);
-
-    LOG_WARN(
-        "Distance Monitor local shutdown notice sent");
-
+    sendShutdownNotice(runtimeConfig_.members[baseIndex].nodeNum);
+    LOG_WARN("Distance Monitor local shutdown notice sent");
     return DM_SHUTDOWN_TX_GRACE_MS;
 }
 
@@ -1415,22 +1907,15 @@ void DistanceMonitorModule::logSummary(
     size_t localIndex,
     uint32_t nowMs) const
 {
-    const DmNodeState &local =
-        nodeStates_[localIndex];
+    const DmNodeState &local = nodeStates_[localIndex];
 
     const char *localStateName = "STATIONARY";
     if (highSpeedSosLatched_)
-    {
         localStateName = "IN_VEHICLE";
-    }
     else if (fallFreefallArmed_)
-    {
         localStateName = "FALLING";
-    }
     else if (localMoving_)
-    {
         localStateName = "MOVING";
-    }
 
     LOG_INFO(
         "Self: node=!%08lx role=%s pos=%s battery=%u%% state=%s",
@@ -1440,52 +1925,35 @@ void DistanceMonitorModule::logSummary(
         static_cast<unsigned>(local.batteryPercent),
         localStateName);
 
-    for (size_t index = 0U;
-         index < runtimeConfig_.memberCount;
-         ++index)
+    for (size_t index = 0U; index < runtimeConfig_.memberCount; ++index)
     {
         if (index == localIndex)
-        {
             continue;
-        }
 
-        const DmNodeState &remote =
-            nodeStates_[index];
-
-        uint32_t reportAgeSeconds = 0U;
-        if (remote.hasPositionReportRxTime)
-        {
-            reportAgeSeconds =
-                dmElapsedMs(
-                    nowMs,
-                    remote.lastPositionReportRxMs) /
-                1000U;
-        }
+        const DmNodeState &remote = nodeStates_[index];
+        const uint32_t reportAgeSeconds = remote.hasPositionReportRxTime
+            ? dmElapsedMs(nowMs, remote.lastPositionReportRxMs) / 1000U
+            : 0U;
 
         if (remote.distanceSource == DmDistanceSource::Gps)
         {
-            const unsigned distancePercent =
-                static_cast<unsigned>(
-                    std::lround(
-                        std::max(0.0F, remote.distanceRatio) *
-                        100.0F));
-
+            float ratio = remote.distanceRatio;
+            ratio = std::max(0.0F, std::min(1.0F, ratio));
+            const unsigned pct = static_cast<unsigned>(ratio * 100.0F + 0.5F);
             LOG_INFO(
-                "Member: node=!%08lx paired=%s radio=%s report_age=%lus "
-                "pos=%s dist=%.1fm (%u%%)",
+                "Member: node=!%08lx paired=%s radio=%s report_age=%lus pos=%s dist=%.1fm (%u%%)",
                 static_cast<unsigned long>(remote.nodeNum),
                 remote.paired ? "yes" : "no",
                 dmRadioStateName(remote.radioState),
                 static_cast<unsigned long>(reportAgeSeconds),
                 dmPositionKindName(remote.positionKind),
                 remote.distanceMeters,
-                distancePercent);
+                pct);
         }
         else if (remote.distanceSource == DmDistanceSource::Rssi)
         {
             LOG_INFO(
-                "Member: node=!%08lx paired=%s radio=%s report_age=%lus "
-                "pos=%s band=%s conf=%.2f",
+                "Member: node=!%08lx paired=%s radio=%s report_age=%lus pos=%s band=%s conf=%.2f",
                 static_cast<unsigned long>(remote.nodeNum),
                 remote.paired ? "yes" : "no",
                 dmRadioStateName(remote.radioState),
@@ -1497,8 +1965,7 @@ void DistanceMonitorModule::logSummary(
         else
         {
             LOG_INFO(
-                "Member: node=!%08lx paired=%s radio=%s report_age=%lus "
-                "pos=%s distance=UNAVAILABLE",
+                "Member: node=!%08lx paired=%s radio=%s report_age=%lus pos=%s distance=UNAVAILABLE",
                 static_cast<unsigned long>(remote.nodeNum),
                 remote.paired ? "yes" : "no",
                 dmRadioStateName(remote.radioState),

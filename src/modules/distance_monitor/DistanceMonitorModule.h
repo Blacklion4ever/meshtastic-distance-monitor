@@ -10,27 +10,27 @@
 
 class DistanceMonitorModule : public SinglePortModule, private concurrency::OSThread
 {
-  public:
+public:
     DistanceMonitorModule();
     void setup() override;
 
-    // Called from SystemCommandsModule for the physical button.
     bool handleSingleButtonPress();
     bool handleDoubleButtonPress();
+    bool handleSearchToggle();
+    bool isLocalBase() const;
 
-    // Returns the shutdown grace period requested by Distance Monitor.
     uint32_t prepareLocalShutdown();
 
-  protected:
+protected:
     int32_t runOnce() override;
     ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
     bool wantPacket(const meshtastic_MeshPacket *packet) override;
 
-  private:
+private:
     DmRuntimeConfig runtimeConfig_;
     DmNodeState nodeStates_[DM_MAX_MEMBERS] = {};
     DmRssiFilter directInboundRssi_[DM_MAX_MEMBERS] = {};
-    DmRssiCalibration rssiCalibration_;
+    DmRssiCalibrationProfile rssiProfiles_[DM_MAX_MEMBERS] = {};
     DmRssiFilter baseBeaconRssi_;
     DistanceMonitorAudio audio_;
 
@@ -43,6 +43,8 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     bool hasBaseBeaconTxTime_ = false;
     uint32_t lastSummaryLogMs_ = 0U;
     bool hasSummaryLogTime_ = false;
+    uint32_t lastControlTickMs_ = 0U;
+    bool hasControlTickTime_ = false;
 
     bool forcePositionReport_ = true;
     uint32_t lastPositionReportTxMs_ = 0U;
@@ -62,7 +64,7 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     float gravityZ_ = 1.0F;
 
     uint32_t lastMotionMs_ = 0U;
-    uint8_t vehicleAccelConsecutiveSamples_ = 0U;
+    uint32_t vehicleAccelAboveSinceMs_ = 0U;
     uint32_t highSpeedWatchUntilMs_ = 0U;
     bool highSpeedSosLatched_ = false;
     uint32_t highSpeedBelowSinceMs_ = 0U;
@@ -77,6 +79,30 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     uint8_t localAppliedIntervalSec_ = DM_MIN_REPORT_INTERVAL_S;
     uint8_t localDesiredGpsIntervalSec_ = DM_MIN_REPORT_INTERVAL_S;
     bool gpsSleeping_ = false;
+
+    bool searchModeActive_ = false;
+    size_t searchTargetIndex_ = DM_MAX_MEMBERS;
+    uint32_t lastSearchPulseMs_ = 0U;
+    bool hasSearchPulseTime_ = false;
+    uint32_t lastSearchStartTxMs_ = 0U;
+    bool hasSearchStartTxTime_ = false;
+    bool searchRssiValid_ = false;
+    uint32_t searchLastSampleMs_ = 0U;
+    float searchFilteredDbm_ = 0.0F;
+    float searchPreviousFilteredDbm_ = 0.0F;
+    float searchTrendDbPerSec_ = 0.0F;
+
+    bool trackerSearchActive_ = false;
+    uint32_t trackerSearchBaseNode_ = 0U;
+    uint32_t trackerSearchLeaseUntilMs_ = 0U;
+    uint32_t lastTrackerSearchBeaconTxMs_ = 0U;
+    bool hasTrackerSearchBeaconTxTime_ = false;
+
+    bool rssiCalibrationLoaded_ = false;
+    bool rssiCalibrationDirty_[DM_MAX_MEMBERS] = {};
+    uint32_t rssiCalibrationGeneration_[DM_MAX_MEMBERS] = {};
+    uint32_t rssiCalibrationSavedSamples_[DM_MAX_MEMBERS] = {};
+    uint32_t lastCalibrationSequence_[DM_MAX_MEMBERS] = {};
 
     void loadDefaultConfiguration();
     void initializeIfNeeded();
@@ -97,6 +123,9 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     void processPendingSos(uint32_t nowMs);
     void processNotifications(uint32_t nowMs);
     void updateBaseAudio(size_t localIndex, uint32_t nowMs);
+    void processSearchMode(size_t localIndex, uint32_t nowMs);
+    void processTrackerSearchMode(size_t localIndex, uint32_t nowMs);
+    void updateSearchRssi(float rawRssiDbm, uint32_t nowMs);
 
     void evaluateRemoteDistance(size_t localIndex, size_t remoteIndex, uint32_t nowMs);
     bool evaluateGpsDistance(
@@ -112,8 +141,19 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     void updateRssiCalibration(
         size_t remoteIndex,
         DmNodeState &remoteState,
-        float distanceRatio,
+        float distanceMeters,
         uint32_t nowMs);
+    DmRssiTableEstimate currentRssiEstimate(
+        size_t remoteIndex,
+        const DmNodeState &remoteState,
+        const DmNodeState &localState,
+        uint32_t nowMs) const;
+
+    void loadRssiCalibrationIfNeeded(size_t localIndex);
+    bool loadRssiCalibrationProfile(size_t memberIndex);
+    bool saveRssiCalibrationProfile(size_t memberIndex);
+    void saveAllRssiCalibration(bool force);
+    void logRssiCalibrationTable(size_t memberIndex) const;
 
     DmFaultCause diagnoseRadioLoss(size_t remoteIndex) const;
     bool isRadioFault(DmFaultCause cause) const;
@@ -125,8 +165,8 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     void updateBaseGpsDemand(size_t localIndex);
     void logSummary(size_t localIndex, uint32_t nowMs) const;
 
-    // Local GPS/IMU management is implemented in DistanceMonitorPosition.cpp.
     void startLocalPositionManager(uint32_t nowMs);
+    void sampleLocalImu(DmNodeState &localState, uint32_t nowMs);
     void updateLocalPosition(DmNodeState &localState, uint32_t nowMs);
     bool readImuSample(
         bool &motionDetected,
@@ -145,7 +185,6 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     void updateFallDetection(uint32_t nowMs, float rawNormG);
     void triggerLocalSos(DmSosCause cause);
 
-    // Protocol implementation is in DistanceMonitorPackets.cpp.
     uint32_t allocateSequenceNumber();
     bool encodeMessageHeader(
         DmMessageType type,
@@ -163,6 +202,8 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
         uint32_t nowMs,
         bool &duplicate);
     bool isDirectPacket(const meshtastic_MeshPacket &packet) const;
+    void noteRemoteSession(DmNodeState &sender, uint32_t sessionId, uint32_t nowMs);
+    void clearUnpairedFault(DmNodeState &sender);
 
     bool sendAliveRequest(uint32_t target);
     bool sendAliveResponse(uint32_t target);
@@ -192,6 +233,9 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
         uint32_t notificationSequence,
         uint32_t trackerSessionId);
     bool sendShutdownNotice(uint32_t target);
+    bool sendSearchStart(uint32_t target);
+    bool sendSearchBeacon(uint32_t target);
+    bool sendSearchStop(uint32_t target);
 
     bool sendPacket(
         uint32_t target,
@@ -251,6 +295,21 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
         const meshtastic_MeshPacket &mp,
         uint32_t nowMs);
     void handleShutdownNotice(
+        DmNodeState &sender,
+        const meshtastic_MeshPacket &mp,
+        uint32_t nowMs);
+    void handleSearchStart(
+        size_t senderIndex,
+        DmNodeState &sender,
+        const meshtastic_MeshPacket &mp,
+        uint32_t nowMs);
+    void handleSearchBeacon(
+        size_t senderIndex,
+        DmNodeState &sender,
+        const meshtastic_MeshPacket &mp,
+        uint32_t nowMs);
+    void handleSearchStop(
+        size_t senderIndex,
         DmNodeState &sender,
         const meshtastic_MeshPacket &mp,
         uint32_t nowMs);
