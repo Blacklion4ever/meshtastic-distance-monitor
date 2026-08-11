@@ -1099,7 +1099,7 @@ bool DistanceMonitorModule::decodeMessageHeader(
     if (rawType <
             static_cast<uint8_t>(DmMessageType::AliveRequest) ||
         rawType >
-            static_cast<uint8_t>(DmMessageType::ShutdownNotice))
+            static_cast<uint8_t>(DmMessageType::SearchStop))
     {
         return false;
     }
