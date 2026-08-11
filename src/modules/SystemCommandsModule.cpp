@@ -92,7 +92,11 @@ int SystemCommandsModule::handleInputEvent(const InputEvent *event)
             return true;
         }
         break;
-        // GPS
+    case INPUT_BROKER_DISTANCE_SEARCH_TOGGLE:
+        if (distanceMonitorModule && distanceMonitorModule->handleSearchToggle()) {
+            return true;
+        }
+        break;
     case INPUT_BROKER_GPS_TOGGLE:
 #if !MESHTASTIC_EXCLUDE_GPS
         if (gps) {

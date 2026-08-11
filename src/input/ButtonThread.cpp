@@ -40,6 +40,7 @@ bool ButtonThread::initButton(const ButtonConfig &config)
     _pressHandler = config.onPress;
     _releaseHandler = config.onRelease;
     _suppressLeadUp = config.suppressLeadUpSound;
+    _deferLongPressUntilRelease = config.deferLongPressUntilRelease;
     _longLongPress = config.longLongPress;
 
     userButton = OneButton(config.pinNumber, config.activeLow, config.activePullup);

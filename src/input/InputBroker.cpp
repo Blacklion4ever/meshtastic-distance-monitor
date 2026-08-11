@@ -4,6 +4,7 @@
 #include "graphics/Screen.h"
 #include "input/HapticFeedback.h"
 #include "modules/ExternalNotificationModule.h"
+#include "modules/distance_monitor/DistanceMonitorModule.h"
 
 #if ARCH_PORTDUINO
 #include "input/LinuxInputImpl.h"
@@ -356,6 +357,15 @@ void InputBroker::Init()
         userConfigNoScreen.longLongPress = INPUT_BROKER_SHUTDOWN;
         userConfigNoScreen.doublePress = INPUT_BROKER_SEND_PING;
         userConfigNoScreen.triplePress = INPUT_BROKER_GPS_TOGGLE;
+
+        if (distanceMonitorModule && distanceMonitorModule->isLocalBase()) {
+            userConfigNoScreen.longPress = INPUT_BROKER_DISTANCE_SEARCH_TOGGLE;
+            userConfigNoScreen.longPressTime = DM_SEARCH_LONG_PRESS_MS;
+            userConfigNoScreen.longLongPress = INPUT_BROKER_SHUTDOWN;
+            userConfigNoScreen.longLongPressTime = DM_SEARCH_LONG_LONG_PRESS_MS;
+            userConfigNoScreen.suppressLeadUpSound = true;
+            userConfigNoScreen.deferLongPressUntilRelease = true;
+        }
         UserButtonThread->initButton(userConfigNoScreen);
     }
 #endif

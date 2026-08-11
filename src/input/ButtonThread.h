@@ -16,6 +16,8 @@ struct ButtonConfig {
     voidFuncPtr onPress = nullptr;   // Optional edge callbacks
     voidFuncPtr onRelease = nullptr; // Optional edge callbacks
     bool suppressLeadUpSound = false;
+
+    bool deferLongPressUntilRelease = false;
     input_broker_event singlePress = INPUT_BROKER_NONE;
     input_broker_event longPress = INPUT_BROKER_NONE;
     uint16_t longPressTime = 500;
