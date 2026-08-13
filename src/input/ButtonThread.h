@@ -102,6 +102,7 @@ class ButtonThread : public Observable<const InputEvent *>, public concurrency::
     voidFuncPtr _pressHandler = nullptr;
     voidFuncPtr _releaseHandler = nullptr;
     bool _suppressLeadUp = false;
+    bool _deferLongPressUntilRelease = false;
     uint16_t _longPressTime = 500;
     uint16_t _longLongPressTime = 3900;
     int _pinNum = 0;
