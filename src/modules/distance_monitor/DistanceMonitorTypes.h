@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DistanceMonitorConfig.h"
-
 #include <cstddef>
 #include <cstdint>
 
@@ -69,9 +68,6 @@ enum class DmMessageType : uint8_t
     Notification = 9,
     NotificationAck = 10,
     ShutdownNotice = 11,
-    SearchStart = 12,
-    SearchBeacon = 13,
-    SearchStop = 14,
 };
 
 enum DmPositionReportFlags : uint8_t
@@ -136,7 +132,6 @@ struct DmNodeState
     uint32_t nodeNum = 0U;
     bool isLocal = false;
     bool isBase = false;
-
     uint32_t remoteSessionId = 0U;
     uint32_t remoteUptimeSeconds = 0U;
     bool hasRemoteUptime = false;
@@ -151,7 +146,6 @@ struct DmNodeState
 
     uint32_t lastAnyPacketRxMs = 0U;
     bool hasAnyPacketRxTime = false;
-
     uint32_t lastPositionReportRxMs = 0U;
     uint32_t lastPositionReportSequence = 0U;
     uint32_t lastIntervalEvaluationSequence = 0U;
@@ -160,7 +154,6 @@ struct DmNodeState
 
     uint32_t lastLinkProbeMs = 0U;
     bool hasLinkProbeTime = false;
-
     DmFaultCause faultCause = DmFaultCause::None;
     uint32_t faultStartedMs = 0U;
     uint32_t faultSnoozedUntilMs = 0U;
@@ -176,7 +169,6 @@ struct DmNodeState
     int32_t longitudeI = 0;
     uint32_t positionAgeAtRxSeconds = 0U;
     uint32_t positionRxMs = 0U;
-
     uint8_t appliedIntervalSec = 0U;
     uint8_t desiredIntervalSec = 0U;
     uint8_t batteryPercent = 0U;
@@ -197,7 +189,6 @@ struct DmNodeState
 
     DmDistanceBandEstimate rssiEstimate = {};
     bool distanceEstimateFault = false;
-
     float currentDistanceAlertRatio = 0.0F;
     float activeDistanceAlertRatio = 0.0F;
     uint32_t distanceSnoozedUntilMs = 0U;
@@ -210,7 +201,6 @@ struct DmNodeState
     bool sosActive = false;
     uint32_t activeSosSequence = 0U;
     DmSosCause activeSosCause = DmSosCause::ManualButton;
-
     uint32_t pendingNotificationSequence = 0U;
     uint32_t pendingNotificationSinceMs = 0U;
     bool notificationAcked = false;

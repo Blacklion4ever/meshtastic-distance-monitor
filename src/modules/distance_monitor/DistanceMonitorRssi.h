@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DistanceMonitorTypes.h"
-
 #include <cstddef>
 #include <cstdint>
 
@@ -10,7 +9,6 @@ class DmRssiFilter
   public:
     void reset();
     void update(float sampleDbm, uint32_t nowMs);
-
     bool isUsable(uint32_t nowMs, uint32_t maxAgeMs) const;
     bool isInitialized() const { return initialized_; }
     uint32_t sampleCount() const { return sampleCount_; }
@@ -36,7 +34,6 @@ class DmOnlineStats
     void reset();
     void restore(uint32_t count, float mean, float m2);
     void update(float value);
-
     uint32_t count() const { return count_; }
     float mean() const { return mean_; }
     float m2() const { return m2_; }
@@ -63,7 +60,6 @@ struct DmRssiTableEstimate
     float alertProbability = 0.0F;
     float fusedRssiDbm = 0.0F;
     float fusedTrendDbPerSec = 0.0F;
-    float proximity = 0.0F;
     bool calibrated = false;
     bool positiveAlert = false;
 };
@@ -72,18 +68,13 @@ class DmRssiCalibrationProfile
 {
   public:
     DmRssiCalibrationProfile();
-
     void reset();
+
     bool update(float distanceMeters,
                 bool baseToTrackerValid,
                 float baseToTrackerDbm,
                 bool trackerToBaseValid,
                 float trackerToBaseDbm);
-
-    bool observeSignal(bool baseToTrackerValid,
-                       float baseToTrackerDbm,
-                       bool trackerToBaseValid,
-                       float trackerToBaseDbm);
 
     DmRssiTableEstimate estimate(
         bool baseToTrackerValid,
@@ -101,22 +92,11 @@ class DmRssiCalibrationProfile
     const DmRssiCalibrationBin &bin(size_t index) const { return bins_[index]; }
     DmRssiCalibrationBin &bin(size_t index) { return bins_[index]; }
 
-    bool bestBaseToTrackerValid() const { return bestBaseToTrackerValid_; }
-    bool bestTrackerToBaseValid() const { return bestTrackerToBaseValid_; }
-    float bestBaseToTrackerDbm() const { return bestBaseToTrackerDbm_; }
-    float bestTrackerToBaseDbm() const { return bestTrackerToBaseDbm_; }
-    void restoreBest(bool btValid, float btDbm, bool tbValid, float tbDbm);
-
     uint32_t totalSamples() const;
     bool hasSafetyCoverage() const;
 
   private:
     DmRssiCalibrationBin bins_[DM_RSSI_CALIBRATION_BIN_COUNT] = {};
-    bool bestBaseToTrackerValid_ = false;
-    bool bestTrackerToBaseValid_ = false;
-    float bestBaseToTrackerDbm_ = 0.0F;
-    float bestTrackerToBaseDbm_ = 0.0F;
-
     int findBin(float distanceMeters) const;
 };
 

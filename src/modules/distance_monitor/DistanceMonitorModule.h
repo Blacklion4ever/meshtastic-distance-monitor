@@ -4,7 +4,6 @@
 #include "DistanceMonitorConfig.h"
 #include "DistanceMonitorRssi.h"
 #include "DistanceMonitorTypes.h"
-
 #include "concurrency/OSThread.h"
 #include "mesh/SinglePortModule.h"
 
@@ -33,7 +32,6 @@ private:
     DmRssiCalibrationProfile rssiProfiles_[DM_MAX_MEMBERS] = {};
     DmRssiFilter baseBeaconRssi_;
     DistanceMonitorAudio audio_;
-
     bool moduleInitialized_ = false;
     uint32_t nextSequenceNumber_ = 1U;
     uint32_t bootMs_ = 0U;
@@ -49,7 +47,6 @@ private:
     bool forcePositionReport_ = true;
     uint32_t lastPositionReportTxMs_ = 0U;
     bool hasPositionReportTxTime_ = false;
-
     DmPendingSos pendingSos_;
     uint32_t lastSosTriggerMs_ = 0U;
 
@@ -62,7 +59,6 @@ private:
     float gravityX_ = 0.0F;
     float gravityY_ = 0.0F;
     float gravityZ_ = 1.0F;
-
     uint32_t lastMotionMs_ = 0U;
     uint32_t vehicleAccelAboveSinceMs_ = 0U;
     uint32_t highSpeedWatchUntilMs_ = 0U;
@@ -71,32 +67,26 @@ private:
 
     bool fallFreefallArmed_ = false;
     uint32_t fallFreefallMs_ = 0U;
-
     uint32_t localFixMs_ = 0U;
     uint32_t lastGpsSolutionId_ = 0U;
+    uint32_t lastGpsNoFixDiagMs_ = 0U;
+    bool hasGpsNoFixDiagTime_ = false;
     meshtastic_Position localFix_ = {};
     DmPositionKind localPositionKind_ = DmPositionKind::NoFix;
+    // localAppliedIntervalSec_ remains the Distance Monitor position-report
+    // interval used by the wire protocol. It no longer drives GNSS cadence.
     uint8_t localAppliedIntervalSec_ = DM_MIN_REPORT_INTERVAL_S;
-    uint8_t localDesiredGpsIntervalSec_ = DM_MIN_REPORT_INTERVAL_S;
+
+    // Kept for source compatibility with existing packet/base-demand code.
+    // DistanceMonitorPosition.cpp ignores this value for GNSS power/cadence;
+    // GNSS is fixed to ALWAYS_ON at 1 Hz.
+    uint8_t localDesiredGpsIntervalSec_ = 1U;
     bool gpsSleeping_ = false;
 
     bool searchModeActive_ = false;
     size_t searchTargetIndex_ = DM_MAX_MEMBERS;
     uint32_t lastSearchPulseMs_ = 0U;
     bool hasSearchPulseTime_ = false;
-    uint32_t lastSearchStartTxMs_ = 0U;
-    bool hasSearchStartTxTime_ = false;
-    bool searchRssiValid_ = false;
-    uint32_t searchLastSampleMs_ = 0U;
-    float searchFilteredDbm_ = 0.0F;
-    float searchPreviousFilteredDbm_ = 0.0F;
-    float searchTrendDbPerSec_ = 0.0F;
-
-    bool trackerSearchActive_ = false;
-    uint32_t trackerSearchBaseNode_ = 0U;
-    uint32_t trackerSearchLeaseUntilMs_ = 0U;
-    uint32_t lastTrackerSearchBeaconTxMs_ = 0U;
-    bool hasTrackerSearchBeaconTxTime_ = false;
 
     bool rssiCalibrationLoaded_ = false;
     bool rssiCalibrationDirty_[DM_MAX_MEMBERS] = {};
@@ -114,7 +104,6 @@ private:
 
     uint32_t uptimeSeconds(uint32_t nowMs) const;
     uint8_t currentBatteryPercent() const;
-
     void processBase(size_t localIndex, uint32_t nowMs);
     void processTracker(size_t localIndex, uint32_t nowMs);
     void processPairing(size_t localIndex, uint32_t nowMs);
@@ -124,9 +113,6 @@ private:
     void processNotifications(uint32_t nowMs);
     void updateBaseAudio(size_t localIndex, uint32_t nowMs);
     void processSearchMode(size_t localIndex, uint32_t nowMs);
-    void processTrackerSearchMode(size_t localIndex, uint32_t nowMs);
-    void updateSearchRssi(float rawRssiDbm, uint32_t nowMs);
-
     void evaluateRemoteDistance(size_t localIndex, size_t remoteIndex, uint32_t nowMs);
     bool evaluateGpsDistance(
         const DmNodeState &localState,
@@ -148,7 +134,6 @@ private:
         const DmNodeState &remoteState,
         const DmNodeState &localState,
         uint32_t nowMs) const;
-
     void loadRssiCalibrationIfNeeded(size_t localIndex);
     bool loadRssiCalibrationProfile(size_t memberIndex);
     bool saveRssiCalibrationProfile(size_t memberIndex);
@@ -158,13 +143,11 @@ private:
     DmFaultCause diagnoseRadioLoss(size_t remoteIndex) const;
     bool isRadioFault(DmFaultCause cause) const;
     bool isFaultAudible(const DmNodeState &state, uint32_t nowMs) const;
-
     uint32_t linkTimeoutMs() const;
     uint32_t rssiBeaconMaxAgeMs() const;
 
     void updateBaseGpsDemand(size_t localIndex);
     void logSummary(size_t localIndex, uint32_t nowMs) const;
-
     void startLocalPositionManager(uint32_t nowMs);
     void sampleLocalImu(DmNodeState &localState, uint32_t nowMs);
     void updateLocalPosition(DmNodeState &localState, uint32_t nowMs);
@@ -175,6 +158,8 @@ private:
     bool readNewValidGpsFix();
     uint32_t currentGpsSolutionId() const;
     void captureGpsFix(uint32_t nowMs);
+    // Compatibility helpers. GNSS policy is ALWAYS_ON; interval arguments from
+    // legacy callers are ignored and sleepGps() is a deliberate no-op.
     void wakeGps(uint8_t updateIntervalSec);
     void sleepGps();
     void applyGpsInterval(uint8_t updateIntervalSec);
@@ -233,10 +218,6 @@ private:
         uint32_t notificationSequence,
         uint32_t trackerSessionId);
     bool sendShutdownNotice(uint32_t target);
-    bool sendSearchStart(uint32_t target);
-    bool sendSearchBeacon(uint32_t target);
-    bool sendSearchStop(uint32_t target);
-
     bool sendPacket(
         uint32_t target,
         DmMessageType type,
@@ -295,21 +276,6 @@ private:
         const meshtastic_MeshPacket &mp,
         uint32_t nowMs);
     void handleShutdownNotice(
-        DmNodeState &sender,
-        const meshtastic_MeshPacket &mp,
-        uint32_t nowMs);
-    void handleSearchStart(
-        size_t senderIndex,
-        DmNodeState &sender,
-        const meshtastic_MeshPacket &mp,
-        uint32_t nowMs);
-    void handleSearchBeacon(
-        size_t senderIndex,
-        DmNodeState &sender,
-        const meshtastic_MeshPacket &mp,
-        uint32_t nowMs);
-    void handleSearchStop(
-        size_t senderIndex,
         DmNodeState &sender,
         const meshtastic_MeshPacket &mp,
         uint32_t nowMs);

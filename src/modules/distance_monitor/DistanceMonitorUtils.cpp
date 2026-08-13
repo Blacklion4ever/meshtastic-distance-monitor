@@ -1,7 +1,6 @@
 #include "DistanceMonitorUtils.h"
 
 #include "DistanceMonitorConfig.h"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -35,7 +34,6 @@ uint8_t quantizeOddDown(float seconds)
     {
         --value;
     }
-
     value = std::max<int>(value, DM_MIN_REPORT_INTERVAL_S);
     value = std::min<int>(value, DM_MAX_REPORT_INTERVAL_CAP_S);
     return static_cast<uint8_t>(value);
@@ -48,12 +46,10 @@ void dmFormatAge(uint32_t totalSeconds, char *buffer, size_t bufferSize)
     {
         return;
     }
-
     const uint32_t days = totalSeconds / 86400U;
     const uint32_t hours = (totalSeconds % 86400U) / 3600U;
     const uint32_t minutes = (totalSeconds % 3600U) / 60U;
     const uint32_t seconds = totalSeconds % 60U;
-
     if (days > 0U)
     {
         std::snprintf(
@@ -90,7 +86,6 @@ void dmFormatAge(uint32_t totalSeconds, char *buffer, size_t bufferSize)
             static_cast<unsigned long>(seconds));
     }
 }
-
 uint32_t dmElapsedMs(uint32_t nowMs, uint32_t previousMs)
 {
     return static_cast<uint32_t>(nowMs - previousMs);
@@ -104,12 +99,10 @@ double dmCalculateDistanceMeters(
 {
     constexpr double EARTH_RADIUS_METERS = 6371000.0;
     constexpr double DEG_TO_RAD_LOCAL = 0.01745329251994329576923690768489;
-
     const double latitude1Rad = latitude1 * DEG_TO_RAD_LOCAL;
     const double longitude1Rad = longitude1 * DEG_TO_RAD_LOCAL;
     const double latitude2Rad = latitude2 * DEG_TO_RAD_LOCAL;
     const double longitude2Rad = longitude2 * DEG_TO_RAD_LOCAL;
-
     const double deltaLatitude = latitude2Rad - latitude1Rad;
     const double deltaLongitude = longitude2Rad - longitude1Rad;
     const double sinHalfDeltaLatitude = std::sin(deltaLatitude * 0.5);
@@ -119,7 +112,6 @@ double dmCalculateDistanceMeters(
         sinHalfDeltaLatitude * sinHalfDeltaLatitude +
         std::cos(latitude1Rad) * std::cos(latitude2Rad) *
             sinHalfDeltaLongitude * sinHalfDeltaLongitude;
-
     haversine = std::max(0.0, std::min(1.0, haversine));
     const double angularDistance =
         2.0 * std::atan2(
@@ -134,7 +126,6 @@ uint8_t dmComputeMaxReportIntervalSec(float maxDistanceMeters)
     const float denominator =
         DM_DESIGN_RELATIVE_SPEED_MPS *
         static_cast<float>(DM_MIN_SAMPLES_PER_DMAX);
-
     if (maxDistanceMeters <= 0.0F || denominator <= 0.0F)
     {
         return DM_MIN_REPORT_INTERVAL_S;
@@ -151,7 +142,6 @@ uint8_t dmComputeMaxReportIntervalSec(float maxDistanceMeters)
 
     return quantizeOddDown(limitedSeconds);
 }
-
 uint8_t dmComputeReportIntervalSec(
     float distanceRatio,
     float maxDistanceMeters)
@@ -164,14 +154,12 @@ uint8_t dmComputeReportIntervalSec(
 
     return quantizeOddDown(seconds);
 }
-
 uint32_t dmDistanceBipIntervalMs(float distanceRatio)
 {
     if (distanceRatio < 0.80F)
     {
         return 0U;
     }
-
     float seconds = 1.0F;
     if (distanceRatio < 0.90F)
     {
@@ -189,7 +177,6 @@ uint32_t dmDistanceBipIntervalMs(float distanceRatio)
     {
         seconds = interpolate(distanceRatio, 1.50F, 2.0F, 2.00F, 1.0F);
     }
-
     return static_cast<uint32_t>(seconds * 1000.0F + 0.5F);
 }
 
@@ -210,7 +197,6 @@ const char *dmRadioStateName(DmRadioState state)
         return "UNKNOWN";
     }
 }
-
 const char *dmPositionKindName(DmPositionKind kind)
 {
     switch (kind)
@@ -224,7 +210,6 @@ const char *dmPositionKindName(DmPositionKind kind)
         return "NO_FIX";
     }
 }
-
 const char *dmDistanceSourceName(DmDistanceSource source)
 {
     switch (source)
@@ -238,7 +223,6 @@ const char *dmDistanceSourceName(DmDistanceSource source)
         return "NONE";
     }
 }
-
 const char *dmDistanceBandName(DmDistanceBand band)
 {
     switch (band)
@@ -256,7 +240,6 @@ const char *dmDistanceBandName(DmDistanceBand band)
         return "UNKNOWN";
     }
 }
-
 const char *dmFaultCauseName(DmFaultCause cause)
 {
     switch (cause)
@@ -278,7 +261,6 @@ const char *dmFaultCauseName(DmFaultCause cause)
         return "NONE";
     }
 }
-
 const char *dmSosCauseName(DmSosCause cause)
 {
     switch (cause)
@@ -292,7 +274,6 @@ const char *dmSosCauseName(DmSosCause cause)
         return "MANUAL_BUTTON";
     }
 }
-
 const char *dmMessageTypeName(DmMessageType type)
 {
     switch (type)
@@ -319,12 +300,6 @@ const char *dmMessageTypeName(DmMessageType type)
         return "NOTIFICATION_ACK";
     case DmMessageType::ShutdownNotice:
         return "SHUTDOWN_NOTICE";
-    case DmMessageType::SearchStart:
-        return "SEARCH_START";
-    case DmMessageType::SearchBeacon:
-        return "SEARCH_BEACON";
-    case DmMessageType::SearchStop:
-        return "SEARCH_STOP";
     default:
         return "UNKNOWN";
     }

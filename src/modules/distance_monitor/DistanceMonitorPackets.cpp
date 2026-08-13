@@ -5,7 +5,6 @@
 #include "NodeDB.h"
 #include "mesh/generated/meshtastic/mesh.pb.h"
 #include "mesh/mesh-pb-constants.h"
-
 #include <Arduino.h>
 #include <algorithm>
 #include <cmath>
@@ -13,50 +12,35 @@
 
 namespace
 {
-    void writeU32Le(uint8_t *buffer, size_t offset, uint32_t value)
-    {
-        buffer[offset] = static_cast<uint8_t>(value & 0xFFU);
-        buffer[offset + 1U] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
-        buffer[offset + 2U] = static_cast<uint8_t>((value >> 16U) & 0xFFU);
-        buffer[offset + 3U] = static_cast<uint8_t>((value >> 24U) & 0xFFU);
-    }
+void writeU32Le(uint8_t *buffer, size_t offset, uint32_t value)
+{
+    buffer[offset] = static_cast<uint8_t>(value & 0xFFU);
+    buffer[offset + 1U] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
+    buffer[offset + 2U] = static_cast<uint8_t>((value >> 16U) & 0xFFU);
+    buffer[offset + 3U] = static_cast<uint8_t>((value >> 24U) & 0xFFU);
+}
 
-    uint32_t readU32Le(const uint8_t *buffer, size_t offset)
-    {
-        return static_cast<uint32_t>(buffer[offset]) |
-               (static_cast<uint32_t>(buffer[offset + 1U]) << 8U) |
-               (static_cast<uint32_t>(buffer[offset + 2U]) << 16U) |
-               (static_cast<uint32_t>(buffer[offset + 3U]) << 24U);
-    }
+uint32_t readU32Le(const uint8_t *buffer, size_t offset)
+{
+    return static_cast<uint32_t>(buffer[offset]) |
+           (static_cast<uint32_t>(buffer[offset + 1U]) << 8U) |
+           (static_cast<uint32_t>(buffer[offset + 2U]) << 16U) |
+           (static_cast<uint32_t>(buffer[offset + 3U]) << 24U);
+}
 
-    int8_t encodeSignedByte(float value)
-    {
-        const long rounded = std::lround(value);
-        return static_cast<int8_t>(
-            std::max<long>(-127L, std::min<long>(127L, rounded)));
-    }
+int8_t encodeSignedByte(float value)
+{
+    const long rounded = std::lround(value);
+    return static_cast<int8_t>(
+        std::max<long>(-127L, std::min<long>(127L, rounded)));
+}
 
-    uint8_t encodeUnsignedByte(float value)
-    {
-        const long rounded = std::lround(value);
-        return static_cast<uint8_t>(
-            std::max<long>(0L, std::min<long>(255L, rounded)));
-    }
-
-    bool isSearchDirectPacket(const meshtastic_MeshPacket &packet)
-    {
-        const bool lora =
-            packet.transport_mechanism ==
-                meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA ||
-            packet.transport_mechanism ==
-                meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA_ALT1 ||
-            packet.transport_mechanism ==
-                meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA_ALT2 ||
-            packet.transport_mechanism ==
-                meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA_ALT3;
-
-        return lora && !packet.via_mqtt && packet.hop_limit == 0U;
-    }
+uint8_t encodeUnsignedByte(float value)
+{
+    const long rounded = std::lround(value);
+    return static_cast<uint8_t>(
+        std::max<long>(0L, std::min<long>(255L, rounded)));
+}
 }
 
 ProcessMessage DistanceMonitorModule::handleReceived(
@@ -88,7 +72,6 @@ ProcessMessage DistanceMonitorModule::handleReceived(
     DmNodeState &sender = nodeStates_[senderIndex];
     sender.lastAnyPacketRxMs = nowMs;
     sender.hasAnyPacketRxTime = true;
-
     bool duplicate = false;
     if (!acceptSequence(sender, header.sequence, nowMs, duplicate))
     {
@@ -140,18 +123,6 @@ ProcessMessage DistanceMonitorModule::handleReceived(
     case DmMessageType::ShutdownNotice:
         handleShutdownNotice(sender, mp, nowMs);
         break;
-
-    case DmMessageType::SearchStart:
-        handleSearchStart(senderIndex, sender, mp, nowMs);
-        break;
-
-    case DmMessageType::SearchBeacon:
-        handleSearchBeacon(senderIndex, sender, mp, nowMs);
-        break;
-
-    case DmMessageType::SearchStop:
-        handleSearchStop(senderIndex, sender, mp, nowMs);
-        break;
     }
 
     return ProcessMessage::CONTINUE;
@@ -179,7 +150,6 @@ void DistanceMonitorModule::noteRemoteSession(
         sender.hasRemoteUptime = false;
         sender.pairedLocalSessionId = 0U;
         sender.pairedRemoteSessionId = 0U;
-
         if (previouslyPaired)
         {
             sender.faultCause = DmFaultCause::Unpaired;
@@ -222,7 +192,6 @@ void DistanceMonitorModule::handleAliveRequest(
     const uint8_t *payload = mp.decoded.payload.bytes;
     const uint32_t sessionId = readU32Le(payload, 8U);
     const uint32_t remoteUptime = readU32Le(payload, 12U);
-
     noteRemoteSession(sender, sessionId, nowMs);
     sender.remoteUptimeSeconds = remoteUptime;
     sender.hasRemoteUptime = true;
@@ -265,7 +234,6 @@ void DistanceMonitorModule::handlePairConfirm(
     const uint32_t baseSessionId = readU32Le(payload, 8U);
     const uint32_t trackerSessionId = readU32Le(payload, 12U);
     const uint8_t flags = payload[16U];
-
     if (trackerSessionId != bootSessionId_)
         return;
 
@@ -308,7 +276,6 @@ void DistanceMonitorModule::handlePositionReport(
         return;
 
     noteRemoteSession(sender, trackerSessionId, nowMs);
-
     sender.positionKind = static_cast<DmPositionKind>(rawKind);
     sender.appliedIntervalSec = payload[14U];
     sender.batteryPercent = payload[15U];
@@ -355,13 +322,13 @@ void DistanceMonitorModule::handlePositionReport(
         sender.comSaturationSilentUntilMs = 0U;
         sender.faultSnoozedUntilMs = 0U;
     }
+
     sender.shutdownNoticeReceived = false;
 
     if (isDirectPacket(mp))
     {
         const float tbRawDbm = static_cast<float>(mp.rx_rssi);
         directInboundRssi_[senderIndex].update(tbRawDbm, nowMs);
-
         if (sender.remoteBaseRssiValid)
         {
             LOG_INFO(
@@ -454,7 +421,6 @@ void DistanceMonitorModule::handleBaseBeacon(
 
     const uint32_t baseSessionId = readU32Le(mp.decoded.payload.bytes, 8U);
     noteRemoteSession(sender, baseSessionId, nowMs);
-
     if (isDirectPacket(mp))
         baseBeaconRssi_.update(static_cast<float>(mp.rx_rssi), nowMs);
 }
@@ -578,7 +544,6 @@ void DistanceMonitorModule::handleNotificationAck(
     const uint8_t *payload = mp.decoded.payload.bytes;
     const uint32_t ackedSequence = readU32Le(payload, 8U);
     const uint32_t trackerSessionId = readU32Le(payload, 12U);
-
     if (sender.remoteSessionId != trackerSessionId ||
         sender.pendingNotificationSequence != ackedSequence)
     {
@@ -603,85 +568,6 @@ void DistanceMonitorModule::handleShutdownNotice(
 
     LOG_WARN("Distance Monitor shutdown notice: node=!%08lx",
              static_cast<unsigned long>(sender.nodeNum));
-}
-
-void DistanceMonitorModule::handleSearchStart(
-    size_t,
-    DmNodeState &sender,
-    const meshtastic_MeshPacket &mp,
-    uint32_t nowMs)
-{
-    size_t localIndex = 0U;
-    if (!findLocalIndex(localIndex) ||
-        nodeStates_[localIndex].isBase ||
-        !sender.isBase ||
-        !isSearchDirectPacket(mp))
-    {
-        return;
-    }
-
-    trackerSearchActive_ = true;
-    trackerSearchBaseNode_ = sender.nodeNum;
-    trackerSearchLeaseUntilMs_ = nowMs + DM_SEARCH_TRACKER_LEASE_MS;
-
-    if (!pendingSos_.active && sendSearchBeacon(sender.nodeNum))
-    {
-        lastTrackerSearchBeaconTxMs_ = nowMs;
-        hasTrackerSearchBeaconTxTime_ = true;
-    }
-}
-
-void DistanceMonitorModule::handleSearchBeacon(
-    size_t senderIndex,
-    DmNodeState &sender,
-    const meshtastic_MeshPacket &mp,
-    uint32_t nowMs)
-{
-    size_t localIndex = 0U;
-    if (!findLocalIndex(localIndex) ||
-        !nodeStates_[localIndex].isBase ||
-        sender.isBase ||
-        !sender.paired ||
-        !searchModeActive_ ||
-        senderIndex != searchTargetIndex_ ||
-        !isSearchDirectPacket(mp))
-    {
-        return;
-    }
-
-    updateSearchRssi(static_cast<float>(mp.rx_rssi), nowMs);
-    sender.radioState = DmRadioState::Alive;
-    sender.faultCause = DmFaultCause::None;
-
-    LOG_DEBUG(
-        "Distance Monitor SEARCH RSSI: node=!%08lx raw=%d filt=%.1f trend=%.2f",
-        static_cast<unsigned long>(sender.nodeNum),
-        static_cast<int>(mp.rx_rssi),
-        static_cast<double>(searchFilteredDbm_),
-        static_cast<double>(searchTrendDbPerSec_));
-}
-
-void DistanceMonitorModule::handleSearchStop(
-    size_t,
-    DmNodeState &sender,
-    const meshtastic_MeshPacket &mp,
-    uint32_t)
-{
-    size_t localIndex = 0U;
-    if (!findLocalIndex(localIndex) ||
-        nodeStates_[localIndex].isBase ||
-        !sender.isBase ||
-        !isSearchDirectPacket(mp) ||
-        !trackerSearchActive_ ||
-        trackerSearchBaseNode_ != sender.nodeNum)
-    {
-        return;
-    }
-
-    trackerSearchActive_ = false;
-    trackerSearchBaseNode_ = 0U;
-    hasTrackerSearchBeaconTxTime_ = false;
-    forcePositionReport_ = true;
 }
 
 bool DistanceMonitorModule::sendAliveRequest(uint32_t target)
@@ -759,7 +645,6 @@ bool DistanceMonitorModule::sendPositionReport(
 {
     uint8_t body[23] = {};
     writeU32Le(body, 0U, bootSessionId_);
-
     body[4U] = static_cast<uint8_t>(localState.positionKind);
 
     uint8_t flags = 0U;
@@ -780,7 +665,6 @@ bool DistanceMonitorModule::sendPositionReport(
             rssiBeaconMaxAgeMs()))
     {
         flags |= DM_POSITION_FLAG_BASE_RSSI_VALID;
-
         body[20U] = static_cast<uint8_t>(
             encodeSignedByte(baseBeaconRssi_.meanDbm()));
         body[21U] = encodeUnsignedByte(
@@ -796,7 +680,6 @@ bool DistanceMonitorModule::sendPositionReport(
 
     const bool hasPosition =
         localState.positionKind != DmPositionKind::NoFix;
-
     writeU32Le(
         body,
         8U,
@@ -934,42 +817,6 @@ bool DistanceMonitorModule::sendShutdownNotice(uint32_t target)
         false);
 }
 
-bool DistanceMonitorModule::sendSearchStart(uint32_t target)
-{
-    return sendPacket(
-        target,
-        DmMessageType::SearchStart,
-        allocateSequenceNumber(),
-        nullptr,
-        0U,
-        false,
-        false);
-}
-
-bool DistanceMonitorModule::sendSearchBeacon(uint32_t target)
-{
-    return sendPacket(
-        target,
-        DmMessageType::SearchBeacon,
-        allocateSequenceNumber(),
-        nullptr,
-        0U,
-        false,
-        false);
-}
-
-bool DistanceMonitorModule::sendSearchStop(uint32_t target)
-{
-    return sendPacket(
-        target,
-        DmMessageType::SearchStop,
-        allocateSequenceNumber(),
-        nullptr,
-        0U,
-        false,
-        false);
-}
-
 bool DistanceMonitorModule::sendPacket(
     uint32_t target,
     DmMessageType type,
@@ -994,7 +841,6 @@ bool DistanceMonitorModule::sendPacket(
 
     const size_t totalSize =
         DM_PROTOCOL_HEADER_SIZE + bodySize;
-
     if (totalSize > sizeof(packet->decoded.payload.bytes))
     {
         return false;
@@ -1026,7 +872,6 @@ bool DistanceMonitorModule::sendPacket(
     packet->want_ack = wantAck;
 
     packet->hop_limit = 0U;
-
     if (reliable)
     {
         packet->priority =
@@ -1063,7 +908,6 @@ bool DistanceMonitorModule::encodeMessageHeader(
     size_t &encodedSize) const
 {
     encodedSize = 0U;
-
     if (buffer == nullptr ||
         bufferSize < DM_PROTOCOL_HEADER_SIZE ||
         sequence == 0U)
@@ -1099,7 +943,7 @@ bool DistanceMonitorModule::decodeMessageHeader(
     if (rawType <
             static_cast<uint8_t>(DmMessageType::AliveRequest) ||
         rawType >
-            static_cast<uint8_t>(DmMessageType::SearchStop))
+            static_cast<uint8_t>(DmMessageType::ShutdownNotice))
     {
         return false;
     }
@@ -1160,7 +1004,6 @@ bool DistanceMonitorModule::acceptSequence(
         freeIndex < DM_RECENT_SEQUENCE_COUNT
             ? freeIndex
             : oldestIndex;
-
     state.recentSequences[targetIndex].sequence = sequence;
     state.recentSequences[targetIndex].receivedMs = nowMs;
     return true;
