@@ -31,6 +31,12 @@ private:
     DmRssiFilter baseBeaconRssi_;
     DistanceMonitorAudio audio_;
 
+    int statusLedPin_ = -1;
+    uint32_t lastLedHeartbeatMs_ = 0U;
+    bool hasLedHeartbeatTime_ = false;
+    uint32_t ledTransitionMs_ = 0U;
+    uint8_t ledEventPhase_ = 0U;
+
     bool moduleInitialized_ = false;
     uint32_t nextSequenceNumber_ = 1U;
     uint32_t bootMs_ = 0U;
@@ -63,6 +69,7 @@ private:
     uint32_t fallFreefallMs_ = 0U;
     uint32_t localFixMs_ = 0U;
     uint32_t lastGpsSolutionId_ = 0U;
+    uint32_t lastGpsFunctionalCheck = 0U;
     meshtastic_Position localFix_ = {};
     DmPositionKind localPositionKind_ = DmPositionKind::NoFix;
     uint8_t localAppliedIntervalSec_ = DM_MIN_REPORT_INTERVAL_S;
@@ -75,6 +82,8 @@ private:
     bool rssiCalibrationLoaded_ = false;
     uint32_t rssiCalibrationGeneration_[DM_MAX_MEMBERS] = {};
     uint32_t lastCalibrationSequence_[DM_MAX_MEMBERS] = {};
+    uint32_t lastRssiTableLogMs_ = 0U;
+    bool hasRssiTableLogTime_ = false;
 
     void loadDefaultConfiguration();
     void initializeIfNeeded();
@@ -101,7 +110,6 @@ private:
         DmNodeState &remoteState,
         uint32_t nowMs);
     bool evaluateRssiDistance(
-        const DmNodeState &localState,
         size_t remoteIndex,
         DmNodeState &remoteState,
         uint32_t nowMs);
@@ -114,7 +122,6 @@ private:
     DmRssiTableEstimate currentRssiEstimate(
         size_t remoteIndex,
         const DmNodeState &remoteState,
-        const DmNodeState &localState,
         uint32_t nowMs) const;
 
     void loadRssiCalibrationIfNeeded(size_t localIndex);
@@ -128,6 +135,11 @@ private:
     uint32_t linkTimeoutMs() const;
     uint32_t rssiBeaconMaxAgeMs() const;
     void logSummary(size_t localIndex, uint32_t nowMs) const;
+    void logRssiCalibrationTable(uint32_t nowMs);
+    void setupStatusLed();
+    void serviceStatusLed(uint32_t nowMs);
+    void triggerStatusLedDoubleBlink();
+    void setStatusLed(bool on);
 
     // GNSS stays enabled at a fixed one-second cadence. Position-report cadence
     // remains independent and is controlled by localAppliedIntervalSec_.

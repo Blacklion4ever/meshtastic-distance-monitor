@@ -109,10 +109,9 @@ struct DmRecentSequence
 struct DmDistanceBandEstimate
 {
     DmDistanceBand band = DmDistanceBand::Unknown;
+    double predictedDistanceMeters = 0.0;
     float confidence = 0.0F;
-    float fusedRssiDbm = 0.0F;
-    float fusedTrendDbPerSec = 0.0F;
-    float probabilities[4] = {};
+    float bestRssiDbm = 0.0F;
 };
 
 struct DmPendingSos

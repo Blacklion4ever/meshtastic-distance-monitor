@@ -5,11 +5,26 @@
 static constexpr size_t DM_MAX_MEMBERS = 2U;
 
 static constexpr uint8_t DM_PROTOCOL_VERSION = 6U;
-static constexpr const char *DM_FIRMWARE_VERSION = "1.0.0-beta4";
+static constexpr const char *DM_FIRMWARE_VERSION = "1.0.0-beta5-rssi-led";
 
 static constexpr uint32_t DM_TICK_INTERVAL_MS = 40U;
 static constexpr uint32_t DM_CONTROL_INTERVAL_MS = 1000U;
 static constexpr uint32_t DM_SUMMARY_INTERVAL_MS = 5000U;
+
+// Mute alarm audio while preserving alarm state, logs and radio traffic.
+// Pairing, notification and SEARCH feedback remain audible.
+static constexpr bool DM_ALARM_AUDIO_SILENT = true;
+
+// Status LED ergonomics. The module uses LED_POWER when the board exposes it.
+static constexpr bool DM_STATUS_LED_ENABLED = true;
+static constexpr uint32_t DM_LED_HEARTBEAT_INTERVAL_MS = 5000U;
+static constexpr uint32_t DM_LED_HEARTBEAT_ON_MS = 250U;
+static constexpr uint32_t DM_LED_EVENT_ON_MS = 100U;
+static constexpr uint32_t DM_LED_EVENT_OFF_MS = 100U;
+// On nRF52 trackers, values below 255 use PWM. Keep the base fully visible
+// while making the wearable tracker indication less intrusive.
+static constexpr uint8_t DM_LED_BASE_BRIGHTNESS = 255U;
+static constexpr uint8_t DM_LED_TRACKER_BRIGHTNESS = 48U;
 static constexpr float DM_MAX_DISTANCE_M = 100.0F;
 static constexpr float DM_DISTANCE_ALERT_START_RATIO = 0.80F;
 static constexpr float DM_DESIGN_RELATIVE_SPEED_MPS = 7.0F / 3.6F;
@@ -52,8 +67,7 @@ static constexpr size_t DM_RSSI_CALIBRATION_BIN_COUNT = 8U;
 static constexpr float DM_RSSI_OPEN_BIN_MAX_M = 10000.0F;
 static constexpr uint32_t DM_RSSI_TABLE_MIN_BIN_SAMPLES = 4U;
 static constexpr float DM_RSSI_ALERT_PROBABILITY = 0.80F;
-static constexpr uint32_t DM_RSSI_STATIONARY_FRESHNESS_MS = 30U * 1000U;
-static constexpr uint32_t DM_RSSI_MOVING_FRESHNESS_MS = 12U * 1000U;
+static constexpr uint32_t DM_RSSI_TABLE_LOG_INTERVAL_MS = 60U * 1000U;
 static constexpr uint32_t DM_SEARCH_LONG_PRESS_MS = 2000U;
 static constexpr uint32_t DM_SEARCH_LONG_LONG_PRESS_MS = 5000U;
 static constexpr uint32_t DM_SEARCH_PULSE_INTERVAL_MS = 750U;
@@ -95,6 +109,7 @@ static constexpr size_t DM_NOTIFICATION_ACK_SIZE = DM_PROTOCOL_HEADER_SIZE + 8U;
 static constexpr size_t DM_SHUTDOWN_NOTICE_SIZE = DM_PROTOCOL_HEADER_SIZE + 4U;
 static constexpr uint32_t DM_SEQUENCE_DUPLICATE_WINDOW_MS = 5U * 60U * 1000U;
 static constexpr size_t DM_RECENT_SEQUENCE_COUNT = 8U;
+static constexpr uint32_t DM_GPS_FUNCTIONAL_CHECK_MS = 60U * 1000U;
 
 struct DmDefaultMember
 {

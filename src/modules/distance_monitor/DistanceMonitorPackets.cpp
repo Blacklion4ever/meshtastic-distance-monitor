@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace
@@ -37,6 +38,39 @@ uint8_t encodeUnsignedByte(float value)
 {
     const long rounded = std::lround(value);
     return static_cast<uint8_t>(std::max<long>(0L, std::min<long>(255L, rounded)));
+}
+
+void formatRssi(bool valid, float valueDbm, char *buffer, size_t size)
+{
+    if (buffer == nullptr || size == 0U)
+        return;
+
+    if (!valid || !std::isfinite(valueDbm))
+    {
+        std::snprintf(buffer, size, "NA");
+        return;
+    }
+
+    std::snprintf(buffer, size, "%lddBm", std::lround(valueDbm));
+}
+
+void formatCoordinateE7(int32_t valueE7, char *buffer, size_t size)
+{
+    if (buffer == nullptr || size == 0U)
+        return;
+
+    const long raw = static_cast<long>(valueE7);
+    const bool negative = raw < 0L;
+    const unsigned long magnitude = static_cast<unsigned long>(negative ? -raw : raw);
+    const unsigned long degrees = magnitude / 10000000UL;
+    const unsigned long fraction = magnitude % 10000000UL;
+    std::snprintf(
+        buffer,
+        size,
+        "%s%lu.%07lu",
+        negative ? "-" : "",
+        degrees,
+        fraction);
 }
 
 }
@@ -289,8 +323,13 @@ void DistanceMonitorModule::handlePositionReport(
     }
 
     sender.shutdownNoticeReceived = false;
-    if (isDirectPacket(mp))
-        directInboundRssi_[senderIndex].update(static_cast<float>(mp.rx_rssi), nowMs);
+    const bool rssiTbValid = isDirectPacket(mp);
+    const float rssiTbDbm = rssiTbValid ? static_cast<float>(mp.rx_rssi) : 0.0F;
+    if (rssiTbValid)
+        directInboundRssi_[senderIndex].update(rssiTbDbm, nowMs);
+
+    // A valid report is a user-visible RX event on the base.
+    triggerStatusLedDoubleBlink();
 
     const bool pairedReport = (flags & DM_POSITION_FLAG_PAIRED) != 0U;
     if (pairedReport &&
@@ -306,14 +345,40 @@ void DistanceMonitorModule::handlePositionReport(
     }
 
     char battery[8] = {};
+    char rssiBt[16] = {};
+    char rssiTb[16] = {};
     dmFormatBattery(sender.batteryPercent, battery, sizeof(battery));
-    LOG_INFO(
-        "{RX} report from id=!%08lx [pos=%s bat=%s state=%s interval=%us]",
-        static_cast<unsigned long>(sender.nodeNum),
-        dmPositionKindName(sender.positionKind),
-        battery,
-        sender.moving ? "MOVING" : "STATIONARY",
-        static_cast<unsigned>(sender.appliedIntervalSec));
+    formatRssi(sender.remoteBaseRssiValid, sender.remoteBaseRssiMeanDbm, rssiBt, sizeof(rssiBt));
+    formatRssi(rssiTbValid, rssiTbDbm, rssiTb, sizeof(rssiTb));
+
+    if (sender.positionKind == DmPositionKind::FreshFix)
+    {
+        char latitude[24] = {};
+        char longitude[24] = {};
+        formatCoordinateE7(sender.latitudeI, latitude, sizeof(latitude));
+        formatCoordinateE7(sender.longitudeI, longitude, sizeof(longitude));
+        LOG_INFO(
+            "{RX} report from id=!%08lx [pos=FIX Lat=%s Lon=%s bat=%s state=%s interval=%us RSSI_BT=%s RSSI_TB=%s]",
+            static_cast<unsigned long>(sender.nodeNum),
+            latitude,
+            longitude,
+            battery,
+            sender.moving ? "MOVING" : "STATIONARY",
+            static_cast<unsigned>(sender.appliedIntervalSec),
+            rssiBt,
+            rssiTb);
+    }
+    else
+    {
+        LOG_INFO(
+            "{RX} report from id=!%08lx [pos=NO_FIX bat=%s state=%s interval=%us RSSI_BT=%s RSSI_TB=%s]",
+            static_cast<unsigned long>(sender.nodeNum),
+            battery,
+            sender.moving ? "MOVING" : "STATIONARY",
+            static_cast<unsigned>(sender.appliedIntervalSec),
+            rssiBt,
+            rssiTb);
+    }
 }
 
 void DistanceMonitorModule::handleSetPositionInterval(
@@ -382,7 +447,9 @@ void DistanceMonitorModule::handleSos(
     sender.sosActive = true;
     sender.activeSosCause = static_cast<DmSosCause>(rawCause);
 
-    if (!audio_.startSos())
+    triggerStatusLedDoubleBlink();
+
+    if (!DM_ALARM_AUDIO_SILENT && !audio_.startSos())
     {
         LOG_ERROR("{Alarm} Cause=SOS buzzer unavailable");
         return;
@@ -475,6 +542,25 @@ void DistanceMonitorModule::handleShutdownNotice(
     sender.pairedLocalSessionId = 0U;
     sender.pairedRemoteSessionId = 0U;
 
+    size_t localIndex = 0U;
+    size_t senderIndex = 0U;
+    if (findLocalIndex(localIndex) &&
+        nodeStates_[localIndex].isBase &&
+        findMemberIndex(sender.nodeNum, senderIndex))
+    {
+        // Ensure an existing per-tracker profile is loaded before writing it.
+        // This avoids replacing persisted calibration if shutdown arrives very
+        // early during base startup.
+        loadRssiCalibrationIfNeeded(localIndex);
+        if (saveRssiCalibrationProfile(senderIndex))
+        {
+            LOG_INFO(
+                "{RSSI} id=!%08lx calibration=flushed reason=shutdown samples=%lu",
+                static_cast<unsigned long>(sender.nodeNum),
+                static_cast<unsigned long>(rssiProfiles_[senderIndex].totalSamples()));
+        }
+    }
+
     LOG_WARN("{RX} shutdown from id=!%08lx", static_cast<unsigned long>(sender.nodeNum));
 }
 
@@ -530,7 +616,8 @@ bool DistanceMonitorModule::sendPositionReport(
     if (findBaseIndex(baseIndex) && nodeStates_[baseIndex].paired)
         flags |= DM_POSITION_FLAG_PAIRED;
 
-    if (baseBeaconRssi_.isUsable(nowMs, rssiBeaconMaxAgeMs()))
+    if (baseBeaconRssi_.isInitialized() &&
+        dmElapsedMs(nowMs, baseBeaconRssi_.lastUpdateMs()) <= rssiBeaconMaxAgeMs())
     {
         flags |= DM_POSITION_FLAG_BASE_RSSI_VALID;
         body[16U] = static_cast<uint8_t>(encodeSignedByte(baseBeaconRssi_.meanDbm()));
@@ -545,7 +632,17 @@ bool DistanceMonitorModule::sendPositionReport(
     writeU32Le(body, 8U, hasPosition ? static_cast<uint32_t>(localState.latitudeI) : 0U);
     writeU32Le(body, 12U, hasPosition ? static_cast<uint32_t>(localState.longitudeI) : 0U);
 
-    return sendPacket(target, DmMessageType::PositionReport, allocateSequenceNumber(), body, sizeof(body), false, false);
+    const bool sent = sendPacket(
+        target,
+        DmMessageType::PositionReport,
+        allocateSequenceNumber(),
+        body,
+        sizeof(body),
+        false,
+        false);
+    if (sent)
+        triggerStatusLedDoubleBlink();
+    return sent;
 }
 
 bool DistanceMonitorModule::sendSetPositionInterval(
@@ -564,7 +661,11 @@ bool DistanceMonitorModule::sendSos(uint32_t target, uint32_t sequence, DmSosCau
     uint8_t body[5] = {};
     writeU32Le(body, 0U, bootSessionId_);
     body[4U] = static_cast<uint8_t>(cause);
-    return sendPacket(target, DmMessageType::Sos, sequence, body, sizeof(body), true, false);
+    const bool sent =
+        sendPacket(target, DmMessageType::Sos, sequence, body, sizeof(body), true, false);
+    if (sent)
+        triggerStatusLedDoubleBlink();
+    return sent;
 }
 
 bool DistanceMonitorModule::sendSosAck(

@@ -37,36 +37,67 @@ void DistanceMonitorModule::startLocalPositionManager(uint32_t nowMs)
         LOG_WARN("{GPS} marked NOT_PRESENT");
         return;
     }
-
+#endif
     // Distance Monitor keeps GNSS continuously enabled at a fixed one-second
     // cadence. Position-report cadence is handled separately by the protocol.
     ensureGpsAlwaysOn();
-#endif
 }
 
 void DistanceMonitorModule::ensureGpsAlwaysOn()
 {
 #if !MESHTASTIC_EXCLUDE_GPS
     if (gps == nullptr)
+    {
+        LOG_INFO("{GPS} gps == nullptr");
         return;
+    }
 
     bool changed = false;
+
     if (config.position.gps_update_interval != 1U)
     {
         config.position.gps_update_interval = 1U;
         changed = true;
     }
 
-    if (config.position.gps_mode != meshtastic_Config_PositionConfig_GpsMode_ENABLED ||
-        gps->isPowerSaving())
+    const bool stateOn =
+        config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+        !gps->isPowerSaving();
+
+    if (!stateOn)
     {
-        config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_ENABLED;
+        config.position.gps_mode =
+            meshtastic_Config_PositionConfig_GpsMode_ENABLED;
+
         gps->enable();
+
         changed = true;
+        LOG_WARN("{GPS} state=OFF -> forcing enable");
     }
 
     if (changed)
         LOG_INFO("{GPS} enabled interval=1s");
+
+    const bool lock = gps->hasLock();
+    const uint32_t sats = localPosition.sats_in_view;
+    const uint32_t pdop = localPosition.PDOP;
+    const uint32_t hdop = localPosition.HDOP;
+
+    const bool flow =
+        sats != 0U ||
+        pdop != 0U ||
+        hdop != 0U;
+
+    LOG_INFO(
+        "{GPS} state=%s flow=%s lock=%s sats=%lu pdop=%lu hdop=%lu",
+        stateOn ? "ON" : "OFF",
+        flow ? "YES" : "NO",
+        lock ? "YES" : "NO",
+        static_cast<unsigned long>(sats),
+        static_cast<unsigned long>(pdop),
+        static_cast<unsigned long>(hdop));
+#else
+LOG_WARN("{GPS} No GPS support in this build");
 #endif
 }
 
@@ -333,15 +364,11 @@ void DistanceMonitorModule::sampleLocalImu(DmNodeState &localState, uint32_t now
 
 void DistanceMonitorModule::updateLocalPosition(DmNodeState &localState, uint32_t nowMs)
 {
-#if !MESHTASTIC_EXCLUDE_GPS
-    if (gps != nullptr &&
-        (config.position.gps_mode != meshtastic_Config_PositionConfig_GpsMode_ENABLED ||
-         gps->isPowerSaving() ||
-         config.position.gps_update_interval != 1U))
+    if( lastGpsFunctionalCheck == 0U || dmElapsedMs(nowMs, lastGpsFunctionalCheck) >= DM_GPS_FUNCTIONAL_CHECK_MS)
     {
         ensureGpsAlwaysOn();
+        lastGpsFunctionalCheck = nowMs;
     }
-#endif
 
     if (readNewValidGpsFix())
         captureGpsFix(nowMs);
