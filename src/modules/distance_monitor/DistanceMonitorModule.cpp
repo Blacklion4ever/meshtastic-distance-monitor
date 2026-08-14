@@ -313,6 +313,10 @@ void DistanceMonitorModule::processPairing(
         }
 
         DmNodeState &remote = nodeStates_[index];
+        if (remote.shutdownNoticeReceived)
+        {
+            continue;
+        }
         if (remote.paired)
         {
             // Pairing state is intentionally reasserted periodically.  The
@@ -562,6 +566,11 @@ void DistanceMonitorModule::processLinkState(
     else
     {
         remote.radioState = DmRadioState::Lost;
+        // An unpaired tracker must not trigger a radio-loss fault.
+        if (!remote.paired)
+        {
+            return;
+        }
         if (!isRadioFault(remote.faultCause))
         {
             remote.faultCause = diagnoseRadioLoss(remoteIndex);

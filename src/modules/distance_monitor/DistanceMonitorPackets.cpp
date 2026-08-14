@@ -150,6 +150,9 @@ void DistanceMonitorModule::noteRemoteSession(
         sender.hasRemoteUptime = false;
         sender.pairedLocalSessionId = 0U;
         sender.pairedRemoteSessionId = 0U;
+        // A new remote session means the tracker has restarted.
+        sender.shutdownNoticeReceived = false;
+        sender.shutdownNoticeMs = 0U;
         if (previouslyPaired)
         {
             sender.faultCause = DmFaultCause::Unpaired;
@@ -565,6 +568,9 @@ void DistanceMonitorModule::handleShutdownNotice(
     noteRemoteSession(sender, trackerSessionId, nowMs);
     sender.shutdownNoticeReceived = true;
     sender.shutdownNoticeMs = nowMs;
+    sender.paired = false;
+    sender.pairedLocalSessionId = 0U;
+    sender.pairedRemoteSessionId = 0U;
 
     LOG_WARN("Distance Monitor shutdown notice: node=!%08lx",
              static_cast<unsigned long>(sender.nodeNum));
