@@ -215,7 +215,7 @@ int32_t ButtonThread::runOnce()
 
                 break;
             }
-            if (_longPress != INPUT_BROKER_NONE) {
+            if (!_deferLongPressUntilRelease && _longPress != INPUT_BROKER_NONE) {
                 // Forward long press to InputBroker (but NOT as DOWN/SELECT, just forward a "button long press" event)
                 evt.inputEvent = _longPress;
                 this->notifyObservers(&evt);
@@ -283,10 +283,14 @@ int32_t ButtonThread::runOnce()
             LOG_INFO("LONG PRESS RELEASE AFTER %u MILLIS", millis() - buttonPressStartTime);
             // Require press started after boot holdoff to avoid phantom shutdown from floating pins
             if (millis() > 30000 && buttonPressStartTime > 30000 && _longLongPress != INPUT_BROKER_NONE &&
-                (millis() - buttonPressStartTime) >= _longLongPressTime && leadUpPlayed) {
+                (millis() - buttonPressStartTime) >= _longLongPressTime && (leadUpPlayed || _suppressLeadUp)) {
                 evt.inputEvent = _longLongPress;
                 this->notifyObservers(&evt);
-            }
+            } else if (_deferLongPressUntilRelease && _longPress != INPUT_BROKER_NONE &&
+                    (millis() - buttonPressStartTime) >= _longPressTime) {
+                evt.inputEvent = _longPress;
+                this->notifyObservers(&evt);
+}
             // Reset combination tracking
             waitingForLongPress = false;
             leadUpPlayed = false;

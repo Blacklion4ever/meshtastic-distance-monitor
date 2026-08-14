@@ -69,8 +69,8 @@ static constexpr uint32_t DM_RSSI_MOVING_FRESHNESS_MS = 12U * 1000U;
 static constexpr uint32_t DM_RSSI_CHECKPOINT_INTERVAL_MS = 15U * 60U * 1000U;
 static constexpr uint32_t DM_RSSI_CHECKPOINT_SAMPLE_DELTA = 32U;
 
-static constexpr uint32_t DM_SEARCH_LONG_PRESS_MS = 3000U;
-static constexpr uint32_t DM_SEARCH_LONG_LONG_PRESS_MS = 7000U;
+static constexpr uint32_t DM_SEARCH_LONG_PRESS_MS = 2000U;
+static constexpr uint32_t DM_SEARCH_LONG_LONG_PRESS_MS = 5000U;
 static constexpr uint32_t DM_SEARCH_PULSE_INTERVAL_MS = 750U;
 static constexpr float DM_SEARCH_DETECTION_MAX_RATIO = 0.80F;
 static constexpr float DM_SEARCH_CONTACT_RATIO = 0.10F;
