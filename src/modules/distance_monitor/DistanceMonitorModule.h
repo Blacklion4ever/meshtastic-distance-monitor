@@ -1,4 +1,5 @@
 #pragma once
+
 #include "DistanceMonitorAudio.h"
 #include "DistanceMonitorConfig.h"
 #include "DistanceMonitorRssi.h"
@@ -8,26 +9,27 @@
 
 class DistanceMonitorModule : public SinglePortModule, private concurrency::OSThread
 {
-public:
+  public:
     DistanceMonitorModule();
     void setup() override;
-
     bool handleSingleButtonPress();
     bool handleDoubleButtonPress();
     bool handleSearchToggle();
     bool isLocalBase() const;
     uint32_t prepareLocalShutdown();
 
-protected:
+  protected:
     int32_t runOnce() override;
     ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
     bool wantPacket(const meshtastic_MeshPacket *packet) override;
 
-private:
+  private:
     DmRuntimeConfig runtimeConfig_;
     DmNodeState nodeStates_[DM_MAX_MEMBERS] = {};
+
+    // TB = tracker->base direct RSSI. BT = base->tracker RSSI is measured on
+    // the tracker and sent in PositionReport.
     DmRssiFilter directInboundRssi_[DM_MAX_MEMBERS] = {};
-    DmRssiCalibrationProfile rssiProfiles_[DM_MAX_MEMBERS] = {};
     DmRssiFilter baseBeaconRssi_;
     DistanceMonitorAudio audio_;
 
@@ -40,7 +42,8 @@ private:
     bool moduleInitialized_ = false;
     uint32_t nextSequenceNumber_ = 1U;
     uint32_t bootMs_ = 0U;
-    uint32_t bootSessionId_ = 0U;
+    DmSessionId bootSessionId_ = 0U;
+
     uint32_t lastBaseBeaconTxMs_ = 0U;
     bool hasBaseBeaconTxTime_ = false;
     uint32_t lastSummaryLogMs_ = 0U;
@@ -67,9 +70,10 @@ private:
     uint32_t highSpeedBelowSinceMs_ = 0U;
     bool fallFreefallArmed_ = false;
     uint32_t fallFreefallMs_ = 0U;
+
     uint32_t localFixMs_ = 0U;
     uint32_t lastGpsSolutionId_ = 0U;
-    uint32_t lastGpsFunctionalCheck = 0U;
+    uint32_t lastGpsFunctionalCheckMs_ = 0U;
     meshtastic_Position localFix_ = {};
     DmPositionKind localPositionKind_ = DmPositionKind::NoFix;
     uint8_t localAppliedIntervalSec_ = DM_MIN_REPORT_INTERVAL_S;
@@ -78,12 +82,6 @@ private:
     size_t searchTargetIndex_ = DM_MAX_MEMBERS;
     uint32_t lastSearchPulseMs_ = 0U;
     bool hasSearchPulseTime_ = false;
-
-    bool rssiCalibrationLoaded_ = false;
-    uint32_t rssiCalibrationGeneration_[DM_MAX_MEMBERS] = {};
-    uint32_t lastCalibrationSequence_[DM_MAX_MEMBERS] = {};
-    uint32_t lastRssiTableLogMs_ = 0U;
-    bool hasRssiTableLogTime_ = false;
 
     void loadDefaultConfiguration();
     void initializeIfNeeded();
@@ -104,6 +102,8 @@ private:
     void updateBaseAudio(size_t localIndex, uint32_t nowMs);
     void processSearchMode(size_t localIndex, uint32_t nowMs);
 
+    // Evaluate GPS first. It returns false when either fix is absent or when
+    // combined DOP-derived accuracy is too large; caller then uses RSSI LUT.
     void evaluateRemoteDistance(size_t localIndex, size_t remoteIndex, uint32_t nowMs);
     bool evaluateGpsDistance(
         const DmNodeState &localState,
@@ -114,20 +114,6 @@ private:
         DmNodeState &remoteState,
         uint32_t nowMs);
     void updateDistanceAlertState(DmNodeState &remoteState, float currentRatio);
-    void updateRssiCalibration(
-        size_t remoteIndex,
-        DmNodeState &remoteState,
-        float distanceMeters,
-        uint32_t nowMs);
-    DmRssiTableEstimate currentRssiEstimate(
-        size_t remoteIndex,
-        const DmNodeState &remoteState,
-        uint32_t nowMs) const;
-
-    void loadRssiCalibrationIfNeeded(size_t localIndex);
-    bool loadRssiCalibrationProfile(size_t memberIndex);
-    bool saveRssiCalibrationProfile(size_t memberIndex);
-    void saveAllRssiCalibration();
 
     DmFaultCause diagnoseRadioLoss(size_t remoteIndex) const;
     bool isRadioFault(DmFaultCause cause) const;
@@ -135,20 +121,20 @@ private:
     uint32_t linkTimeoutMs() const;
     uint32_t rssiBeaconMaxAgeMs() const;
     void logSummary(size_t localIndex, uint32_t nowMs) const;
-    void logRssiCalibrationTable(uint32_t nowMs);
+
     void setupStatusLed();
     void serviceStatusLed(uint32_t nowMs);
     void triggerStatusLedDoubleBlink();
     void setStatusLed(bool on);
 
-    // GNSS stays enabled at a fixed one-second cadence. Position-report cadence
-    // remains independent and is controlled by localAppliedIntervalSec_.
+    // GNSS stays enabled at 1 Hz. DOP is not a hard fix rejection anymore:
+    // accuracy is carried to the distance layer which decides GPS vs RSSI.
     void startLocalPositionManager(uint32_t nowMs);
-    void ensureGpsAlwaysOn();
+    void ensureGpsAlwaysOn(uint32_t nowMs, bool forceDiagnostic = false);
     void sampleLocalImu(DmNodeState &localState, uint32_t nowMs);
     void updateLocalPosition(DmNodeState &localState, uint32_t nowMs);
     bool readImuSample(bool &motionDetected, float &rawNormG);
-    bool readNewValidGpsFix();
+    bool readNewUsableGpsPosition();
     uint32_t currentGpsSolutionId() const;
     void captureGpsFix(uint32_t nowMs);
     uint32_t localFixAgeSeconds(uint32_t nowMs) const;
@@ -174,19 +160,19 @@ private:
         uint32_t nowMs,
         bool &duplicate);
     bool isDirectPacket(const meshtastic_MeshPacket &packet) const;
-    void noteRemoteSession(DmNodeState &sender, uint32_t sessionId, uint32_t nowMs);
+    void noteRemoteSession(DmNodeState &sender, DmSessionId sessionId, uint32_t nowMs);
     void clearUnpairedFault(DmNodeState &sender);
 
     bool sendAliveRequest(uint32_t target);
     bool sendAliveResponse(uint32_t target);
-    bool sendPairConfirm(uint32_t target, uint32_t trackerSessionId, bool playTrackerTone);
+    bool sendPairConfirm(uint32_t target, DmSessionId trackerSessionId, bool playTrackerTone);
     bool sendBaseBeacon();
     bool sendPositionReport(uint32_t target, const DmNodeState &localState, uint32_t nowMs);
-    bool sendSetPositionInterval(uint32_t target, uint32_t trackerSessionId, uint8_t intervalSec);
+    bool sendSetPositionInterval(uint32_t target, DmSessionId trackerSessionId, uint8_t intervalSec);
     bool sendSos(uint32_t target, uint32_t sequence, DmSosCause cause);
-    bool sendSosAck(uint32_t target, uint32_t sosSequence, uint32_t trackerSessionId);
+    bool sendSosAck(uint32_t target, uint32_t sosSequence, DmSessionId trackerSessionId);
     bool sendNotification(uint32_t target, uint32_t sequence);
-    bool sendNotificationAck(uint32_t target, uint32_t notificationSequence, uint32_t trackerSessionId);
+    bool sendNotificationAck(uint32_t target, uint32_t notificationSequence, DmSessionId trackerSessionId);
     bool sendShutdownNotice(uint32_t target);
     bool sendPacket(
         uint32_t target,

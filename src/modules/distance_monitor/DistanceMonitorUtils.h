@@ -1,4 +1,5 @@
 #pragma once
+
 #include "DistanceMonitorTypes.h"
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +14,14 @@ double dmCalculateDistanceMeters(
 uint8_t dmComputeMaxReportIntervalSec(float maxDistanceMeters);
 uint8_t dmComputeReportIntervalSec(float distanceRatio, float maxDistanceMeters);
 uint32_t dmDistanceBipIntervalMs(float distanceRatio);
+
+// Return the best available DOP. Zero means the corresponding DOP is absent;
+// when both are zero the result is zero and accuracy becomes infinity.
+uint32_t dmBestDop(uint32_t pdop, uint32_t hdop);
+
+// Convert Meshtastic DOP hundredths into a conservative approximate accuracy.
+// DOP==0 is unknown and therefore returns +infinity.
+double dmAccuracyMetersFromDop(uint32_t dop);
 
 const char *dmPositionKindName(DmPositionKind kind);
 const char *dmDistanceSourceName(DmDistanceSource source);

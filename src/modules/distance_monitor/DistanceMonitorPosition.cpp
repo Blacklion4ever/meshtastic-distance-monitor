@@ -10,9 +10,11 @@
 #if !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_I2C && defined(HAS_QMA6100P)
 #include "motion/QMA6100PSensor.h"
 #endif
+
 #include <Arduino.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 void DistanceMonitorModule::startLocalPositionManager(uint32_t nowMs)
 {
@@ -27,28 +29,40 @@ void DistanceMonitorModule::startLocalPositionManager(uint32_t nowMs)
         LOG_WARN("{GPS} unavailable");
         return;
     }
+
     if (config.position.fixed_position)
     {
         LOG_WARN("{GPS} fixed_position enabled");
         return;
     }
-    if (config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT)
+
+    if (config.position.gps_mode ==
+        meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT)
     {
         LOG_WARN("{GPS} marked NOT_PRESENT");
         return;
     }
+
+    // Distance Monitor owns the GNSS cadence and keeps it continuously enabled.
+    ensureGpsAlwaysOn(nowMs, true);
 #endif
-    // Distance Monitor keeps GNSS continuously enabled at a fixed one-second
-    // cadence. Position-report cadence is handled separately by the protocol.
-    ensureGpsAlwaysOn();
 }
 
-void DistanceMonitorModule::ensureGpsAlwaysOn()
+void DistanceMonitorModule::ensureGpsAlwaysOn(
+    uint32_t nowMs,
+    bool forceDiagnostic)
 {
 #if !MESHTASTIC_EXCLUDE_GPS
     if (gps == nullptr)
     {
-        LOG_INFO("{GPS} gps == nullptr");
+        if (forceDiagnostic ||
+            lastGpsFunctionalCheckMs_ == 0U ||
+            dmElapsedMs(nowMs, lastGpsFunctionalCheckMs_) >=
+                DM_GPS_FUNCTIONAL_CHECK_MS)
+        {
+            lastGpsFunctionalCheckMs_ = nowMs;
+            LOG_INFO("{GPS} state=OFF flow=NO sats=0 dop=0 acc=INF pdop=0 hdop=0");
+        }
         return;
     }
 
@@ -61,16 +75,15 @@ void DistanceMonitorModule::ensureGpsAlwaysOn()
     }
 
     const bool stateOn =
-        config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+        config.position.gps_mode ==
+            meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
         !gps->isPowerSaving();
 
     if (!stateOn)
     {
         config.position.gps_mode =
             meshtastic_Config_PositionConfig_GpsMode_ENABLED;
-
         gps->enable();
-
         changed = true;
         LOG_WARN("{GPS} state=OFF -> forcing enable");
     }
@@ -78,30 +91,62 @@ void DistanceMonitorModule::ensureGpsAlwaysOn()
     if (changed)
         LOG_INFO("{GPS} enabled interval=1s");
 
-    const bool lock = gps->hasLock();
+    const bool diagnosticDue =
+        forceDiagnostic ||
+        lastGpsFunctionalCheckMs_ == 0U ||
+        dmElapsedMs(nowMs, lastGpsFunctionalCheckMs_) >=
+            DM_GPS_FUNCTIONAL_CHECK_MS;
+    if (!diagnosticDue)
+        return;
+
+    lastGpsFunctionalCheckMs_ = nowMs;
+
     const uint32_t sats = localPosition.sats_in_view;
     const uint32_t pdop = localPosition.PDOP;
     const uint32_t hdop = localPosition.HDOP;
-
+    const uint32_t dop = dmBestDop(pdop, hdop);
+    const double accuracyM = dmAccuracyMetersFromDop(dop);
     const bool flow =
         sats != 0U ||
         pdop != 0U ||
         hdop != 0U;
 
-    LOG_INFO(
-        "{GPS} state=%s flow=%s lock=%s sats=%lu pdop=%lu hdop=%lu",
-        stateOn ? "ON" : "OFF",
-        flow ? "YES" : "NO",
-        lock ? "YES" : "NO",
-        static_cast<unsigned long>(sats),
-        static_cast<unsigned long>(pdop),
-        static_cast<unsigned long>(hdop));
+    const bool effectiveStateOn =
+        config.position.gps_mode ==
+            meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+        !gps->isPowerSaving();
+
+    if (std::isfinite(accuracyM))
+    {
+        LOG_INFO(
+            "{GPS} state=%s flow=%s sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
+            effectiveStateOn ? "ON" : "OFF",
+            flow ? "YES" : "NO",
+            static_cast<unsigned long>(sats),
+            static_cast<unsigned long>(dop),
+            accuracyM,
+            static_cast<unsigned long>(pdop),
+            static_cast<unsigned long>(hdop));
+    }
+    else
+    {
+        LOG_INFO(
+            "{GPS} state=%s flow=%s sats=%lu dop=0 acc=INF pdop=%lu hdop=%lu",
+            effectiveStateOn ? "ON" : "OFF",
+            flow ? "YES" : "NO",
+            static_cast<unsigned long>(sats),
+            static_cast<unsigned long>(pdop),
+            static_cast<unsigned long>(hdop));
+    }
 #else
-LOG_WARN("{GPS} No GPS support in this build");
+    (void)nowMs;
+    (void)forceDiagnostic;
 #endif
 }
 
-bool DistanceMonitorModule::readImuSample(bool &motionDetected, float &rawNormG)
+bool DistanceMonitorModule::readImuSample(
+    bool &motionDetected,
+    float &rawNormG)
 {
     motionDetected = false;
     rawNormG = 1.0F;
@@ -129,7 +174,7 @@ bool DistanceMonitorModule::readImuSample(bool &motionDetected, float &rawNormG)
         return true;
     }
 
-    // Follow gravity slowly so short accelerations remain visible as movement.
+    // Follow gravity slowly so short accelerations remain movement events.
     gravityX_ += DM_IMU_GRAVITY_ALPHA * (sample.xData - gravityX_);
     gravityY_ += DM_IMU_GRAVITY_ALPHA * (sample.yData - gravityY_);
     gravityZ_ += DM_IMU_GRAVITY_ALPHA * (sample.zData - gravityZ_);
@@ -154,8 +199,6 @@ uint32_t DistanceMonitorModule::currentGpsSolutionId() const
 #if MESHTASTIC_EXCLUDE_GPS
     return 0U;
 #else
-    // Use Meshtastic's published position. GPS time alone is not proof that a
-    // geographic fix exists because UTC may become valid before position lock.
     const meshtastic_Position &position = localPosition;
     if (position.latitude_i == 0 || position.longitude_i == 0)
         return 0U;
@@ -165,14 +208,14 @@ uint32_t DistanceMonitorModule::currentGpsSolutionId() const
     if (position.time != 0U)
         return position.time;
 
-    // Some producers omit timestamps. A content fingerprint still lets us
-    // recognize a newly published valid solution without inventing a clock.
+    // A content fingerprint handles producers that publish no timestamp.
     uint32_t hash = 2166136261U;
     const auto mix = [&hash](uint32_t value)
     {
         hash ^= value;
         hash *= 16777619U;
     };
+
     mix(static_cast<uint32_t>(position.latitude_i));
     mix(static_cast<uint32_t>(position.longitude_i));
     mix(static_cast<uint32_t>(position.sats_in_view));
@@ -182,25 +225,26 @@ uint32_t DistanceMonitorModule::currentGpsSolutionId() const
 #endif
 }
 
-bool DistanceMonitorModule::readNewValidGpsFix()
+bool DistanceMonitorModule::readNewUsableGpsPosition()
 {
 #if MESHTASTIC_EXCLUDE_GPS
     return false;
 #else
-    if (gps == nullptr || !gps->hasLock())
+    if (gps == nullptr)
         return false;
 
     const meshtastic_Position &position = localPosition;
-    if (position.latitude_i == 0 || position.longitude_i == 0 ||
+    if (position.latitude_i == 0 ||
+        position.longitude_i == 0 ||
         position.sats_in_view <= 2U)
     {
         return false;
     }
 
-    const uint32_t hdop = position.HDOP > 0U ? position.HDOP : UINT32_MAX;
-    const uint32_t pdop = position.PDOP > 0U ? position.PDOP : UINT32_MAX;
-    const uint32_t dop = std::min(hdop, pdop);
-    if (dop == UINT32_MAX || dop > runtimeConfig_.maxDop)
+    // DM uses actual coordinates + DOP and lets the distance layer decide
+    // whether the resulting accuracy is sufficient.
+    const uint32_t dop = dmBestDop(position.PDOP, position.HDOP);
+    if (dop == 0U)
         return false;
 
     const uint32_t solutionId = currentGpsSolutionId();
@@ -227,9 +271,13 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
 
     if (acquired)
     {
+        const uint32_t dop = dmBestDop(localFix_.PDOP, localFix_.HDOP);
+        const double accuracyM = dmAccuracyMetersFromDop(dop);
         LOG_INFO(
-            "{GPS} fix sats=%lu pdop=%lu hdop=%lu",
+            "{GPS} fix sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
             static_cast<unsigned long>(localFix_.sats_in_view),
+            static_cast<unsigned long>(dop),
+            accuracyM,
             static_cast<unsigned long>(localFix_.PDOP),
             static_cast<unsigned long>(localFix_.HDOP));
     }
@@ -253,7 +301,8 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
         {
             highSpeedBelowSinceMs_ = nowMs;
         }
-        else if (dmElapsedMs(nowMs, highSpeedBelowSinceMs_) >= DM_HIGH_SPEED_CLEAR_MS)
+        else if (dmElapsedMs(nowMs, highSpeedBelowSinceMs_) >=
+                 DM_HIGH_SPEED_CLEAR_MS)
         {
             highSpeedSosLatched_ = false;
             highSpeedBelowSinceMs_ = 0U;
@@ -271,14 +320,12 @@ uint32_t DistanceMonitorModule::localFixAgeSeconds(uint32_t nowMs) const
 
 uint32_t DistanceMonitorModule::freshFixMaxAgeSeconds() const
 {
-    // GNSS is continuously active at 1 Hz; freshness no longer depends on
-    // movement or on the Distance Monitor report interval.
     return 1U + DM_FRESH_FIX_EXTRA_GRACE_S;
 }
 
 void DistanceMonitorModule::copyLocalPositionToState(
     DmNodeState &localState,
-    uint32_t nowMs) const
+    uint32_t) const
 {
     localState.positionKind = localPositionKind_;
     localState.moving = localMoving_;
@@ -287,17 +334,26 @@ void DistanceMonitorModule::copyLocalPositionToState(
     {
         localState.latitudeI = 0;
         localState.longitudeI = 0;
+        localState.positionDop = 0U;
+        localState.positionAccuracyMeters =
+            std::numeric_limits<double>::infinity();
         return;
     }
 
     localState.latitudeI = localFix_.latitude_i;
     localState.longitudeI = localFix_.longitude_i;
+
+    const uint32_t dop = dmBestDop(localFix_.PDOP, localFix_.HDOP);
+    localState.positionDop = static_cast<uint16_t>(
+        std::min<uint32_t>(dop, static_cast<uint32_t>(UINT16_MAX)));
+    localState.positionAccuracyMeters =
+        dmAccuracyMetersFromDop(localState.positionDop);
 }
 
-void DistanceMonitorModule::updateFallDetection(uint32_t nowMs, float rawNormG)
+void DistanceMonitorModule::updateFallDetection(
+    uint32_t nowMs,
+    float rawNormG)
 {
-    // Fall detection deliberately uses the raw acceleration norm; the gravity
-    // low-pass used for movement detection must not hide free-fall or impact.
     if (!fallFreefallArmed_)
     {
         if (rawNormG < DM_FALL_FREEFALL_THRESHOLD_G)
@@ -322,7 +378,9 @@ void DistanceMonitorModule::updateFallDetection(uint32_t nowMs, float rawNormG)
     }
 }
 
-void DistanceMonitorModule::sampleLocalImu(DmNodeState &localState, uint32_t nowMs)
+void DistanceMonitorModule::sampleLocalImu(
+    DmNodeState &localState,
+    uint32_t nowMs)
 {
     bool motionDetected = false;
     float rawNormG = 1.0F;
@@ -332,7 +390,6 @@ void DistanceMonitorModule::sampleLocalImu(DmNodeState &localState, uint32_t now
     {
         if (imuAvailable_ || !imuWarningLogged_)
             LOG_WARN("{IMU} unavailable");
-
         imuAvailable_ = false;
         imuWarningLogged_ = true;
         gravityReferenceValid_ = false;
@@ -362,15 +419,16 @@ void DistanceMonitorModule::sampleLocalImu(DmNodeState &localState, uint32_t now
         updateFallDetection(nowMs, rawNormG);
 }
 
-void DistanceMonitorModule::updateLocalPosition(DmNodeState &localState, uint32_t nowMs)
+void DistanceMonitorModule::updateLocalPosition(
+    DmNodeState &localState,
+    uint32_t nowMs)
 {
-    if( lastGpsFunctionalCheck == 0U || dmElapsedMs(nowMs, lastGpsFunctionalCheck) >= DM_GPS_FUNCTIONAL_CHECK_MS)
-    {
-        ensureGpsAlwaysOn();
-        lastGpsFunctionalCheck = nowMs;
-    }
+    // Reassert every control tick, but only emit the detailed diagnostic once
+    // per minute. This closes the window where another subsystem could disable
+    // the GNSS without DM noticing.
+    ensureGpsAlwaysOn(nowMs, false);
 
-    if (readNewValidGpsFix())
+    if (readNewUsableGpsPosition())
         captureGpsFix(nowMs);
 
     if (localPositionKind_ == DmPositionKind::FreshFix &&
@@ -413,7 +471,11 @@ void DistanceMonitorModule::triggerLocalSos(DmSosCause cause)
     pendingSos_.lastTxMs = nowMs;
     lastSosTriggerMs_ = nowMs;
 
-    LOG_WARN("{Alarm} Cause=%s", dmSosCauseName(cause));
+    LOG_WARN(
+        "{Alarm} Cause=%s silent=%s",
+        dmSosCauseName(cause),
+        DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
+
     sendSos(
         pendingSos_.targetNode,
         pendingSos_.sequence,

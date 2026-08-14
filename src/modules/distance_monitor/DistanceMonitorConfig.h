@@ -1,36 +1,49 @@
 #pragma once
+
 #include <cstddef>
 #include <cstdint>
 
+// Maximum number of nodes managed by one Distance Monitor group.
 static constexpr size_t DM_MAX_MEMBERS = 2U;
 
-static constexpr uint8_t DM_PROTOCOL_VERSION = 6U;
-static constexpr const char *DM_FIRMWARE_VERSION = "1.0.0-beta5-rssi-led";
+// Protocol V7: 16-bit boot session IDs, compact position flags and DOP transfer.
+static constexpr uint8_t DM_PROTOCOL_VERSION = 7U;
+static constexpr const char *DM_FIRMWARE_VERSION = "1.0.0-beta6-accuracy-rssi-lut";
 
+// Main scheduling cadence.
 static constexpr uint32_t DM_TICK_INTERVAL_MS = 40U;
 static constexpr uint32_t DM_CONTROL_INTERVAL_MS = 1000U;
 static constexpr uint32_t DM_SUMMARY_INTERVAL_MS = 5000U;
 
-// Mute alarm audio while preserving alarm state, logs and radio traffic.
-// Pairing, notification and SEARCH feedback remain audible.
-static constexpr bool DM_ALARM_AUDIO_SILENT = true;
+// When true, distance/radio/SOS alarm audio is muted. Alarm state, logs, radio
+// traffic, pairing/notification tones and SEARCH feedback remain active.
+static constexpr bool DM_ALARM_AUDIO_SILENT = false;
 
-// Status LED ergonomics. The module uses LED_POWER when the board exposes it.
+// Status LED ergonomics.
 static constexpr bool DM_STATUS_LED_ENABLED = true;
 static constexpr uint32_t DM_LED_HEARTBEAT_INTERVAL_MS = 5000U;
 static constexpr uint32_t DM_LED_HEARTBEAT_ON_MS = 250U;
 static constexpr uint32_t DM_LED_EVENT_ON_MS = 100U;
 static constexpr uint32_t DM_LED_EVENT_OFF_MS = 100U;
-// On nRF52 trackers, values below 255 use PWM. Keep the base fully visible
-// while making the wearable tracker indication less intrusive.
+// On nRF52, values below 255 are driven with PWM.
 static constexpr uint8_t DM_LED_BASE_BRIGHTNESS = 255U;
 static constexpr uint8_t DM_LED_TRACKER_BRIGHTNESS = 48U;
+
+// Distance safety configuration.
 static constexpr float DM_MAX_DISTANCE_M = 100.0F;
 static constexpr float DM_DISTANCE_ALERT_START_RATIO = 0.80F;
+// GPS is trusted only while the sum of base+tracker accuracy is at most this
+// fraction of Dmax. Above that, the decision falls back to the RSSI LUT.
+static constexpr float DM_GPS_MAX_COMBINED_ACCURACY_RATIO = 0.50F;
+// DOP is carried as hundredths. Approximate accuracy = DOP/100 * 5 metres.
+static constexpr float DM_DOP_TO_ACCURACY_METERS = 5.0F;
+
 static constexpr float DM_DESIGN_RELATIVE_SPEED_MPS = 7.0F / 3.6F;
 static constexpr uint8_t DM_MIN_SAMPLES_PER_DMAX = 3U;
 static constexpr uint8_t DM_MIN_REPORT_INTERVAL_S = 9U;
 static constexpr uint8_t DM_MAX_REPORT_INTERVAL_CAP_S = 20U;
+
+// Pairing / radio timings.
 static constexpr uint32_t DM_BASE_BEACON_INTERVAL_MS = 10U * 1000U;
 static constexpr uint32_t DM_LINK_TIMEOUT_MARGIN_MS = 5U * 1000U;
 static constexpr uint32_t DM_COM_SATURATION_SILENT_MS = 0U;
@@ -45,6 +58,8 @@ static constexpr uint32_t DM_FAULT_AUDIO_PERIOD_MS = 30U * 1000U;
 static constexpr uint32_t DM_RESEND_TIMEOUT_MS = 5U * 1000U;
 static constexpr uint32_t DM_NOTIFICATION_ACK_WINDOW_MS = 10U * 1000U;
 static constexpr uint32_t DM_SHUTDOWN_TX_GRACE_MS = 500U;
+
+// Motion / SOS configuration.
 static constexpr uint32_t DM_STATIONARY_CONFIRM_MS = 10U * 1000U;
 static constexpr float DM_IMU_MOTION_THRESHOLD_G = 0.08F;
 static constexpr float DM_IMU_GRAVITY_ALPHA = 0.01F;
@@ -54,33 +69,46 @@ static constexpr float DM_FALL_FREEFALL_THRESHOLD_G = 0.65F;
 static constexpr float DM_FALL_IMPACT_THRESHOLD_G = 1.55F;
 static constexpr uint32_t DM_FALL_IMPACT_WINDOW_MS = 900U;
 static constexpr uint32_t DM_SOS_REARM_MS = 10U * 1000U;
+
+// GNSS is kept running continuously by DM. Native Meshtastic broadcasts stay
+// practically disabled because DM owns its own compact position protocol.
 static constexpr uint32_t DM_NATIVE_POSITION_BROADCAST_INTERVAL_S = 24U * 60U * 60U;
 static constexpr uint32_t DM_FRESH_FIX_EXTRA_GRACE_S = 3U;
-static constexpr uint32_t DM_MAX_DOP = 300U;
+static constexpr uint32_t DM_GPS_FUNCTIONAL_CHECK_MS = 60U * 1000U;
+
+// RSSI EMA used only to smooth direct radio measurements. No GPS-based RSSI
+// calibration or persistence is performed anymore.
 static constexpr float DM_RSSI_FILTER_ALPHA = 0.25F;
 static constexpr float DM_RSSI_TREND_ALPHA = 0.25F;
-static constexpr uint8_t DM_RSSI_MIN_SAMPLES = 3U;
 static constexpr uint32_t DM_RSSI_VALID_BEACON_MULTIPLIER = 3U;
-static constexpr float DM_RSSI_MIN_STD_DB = 3.0F;
-static constexpr float DM_RSSI_BOOTSTRAP_STD_DB = 10.0F;
-static constexpr size_t DM_RSSI_CALIBRATION_BIN_COUNT = 8U;
-static constexpr float DM_RSSI_OPEN_BIN_MAX_M = 10000.0F;
-static constexpr uint32_t DM_RSSI_TABLE_MIN_BIN_SAMPLES = 4U;
-static constexpr float DM_RSSI_ALERT_PROBABILITY = 0.80F;
-static constexpr uint32_t DM_RSSI_TABLE_LOG_INTERVAL_MS = 60U * 1000U;
+
+// Manual indoor RSSI proximity LUT. RSSI is negative: the largest value is the
+// best path. Operational bands are Near, Medium, Warning and VeryFar.
+static constexpr float DM_RSSI_NEAR_THRESHOLD_DBM = -50.0F;
+static constexpr float DM_RSSI_MEDIUM_THRESHOLD_DBM = -80.0F;
+static constexpr float DM_RSSI_WARNING_THRESHOLD_DBM = -100.0F;
+// Synthetic alert ratios let the existing alarm cadence work without claiming
+// that RSSI is a metric distance.
+static constexpr float DM_RSSI_WARNING_ALERT_RATIO = 0.80F;
+static constexpr float DM_RSSI_VERY_FAR_ALERT_RATIO = 1.10F;
+
+// SEARCH stays GNSS-only. At <=15 m it immediately reaches maximum proximity.
 static constexpr uint32_t DM_SEARCH_LONG_PRESS_MS = 2000U;
 static constexpr uint32_t DM_SEARCH_LONG_LONG_PRESS_MS = 5000U;
 static constexpr uint32_t DM_SEARCH_PULSE_INTERVAL_MS = 750U;
+static constexpr uint32_t DM_SEARCH_CONTACT_PULSE_INTERVAL_MS = 500U;
 static constexpr float DM_SEARCH_DETECTION_MAX_RATIO = 0.80F;
-static constexpr float DM_SEARCH_CONTACT_RATIO = 0.10F;
-static_assert(DM_SEARCH_CONTACT_RATIO < DM_SEARCH_DETECTION_MAX_RATIO,
-              "SEARCH contact ratio must be below detection max ratio");
+static constexpr float DM_SEARCH_CONTACT_DISTANCE_M = 15.0F;
 static constexpr uint16_t DM_SEARCH_DETECTION_MIN_HZ = 1450U;
-static constexpr uint16_t DM_SEARCH_DETECTION_NEAR_HZ = 2390U;
+static constexpr uint16_t DM_SEARCH_DETECTION_NEAR_HZ = 2600U;
+static constexpr uint16_t DM_SEARCH_DETECTION_CONTACT_HZ = 3100U;
 static constexpr uint16_t DM_SEARCH_DETECTION_DURATION_MIN_MS = 25U;
-static constexpr uint16_t DM_SEARCH_DETECTION_DURATION_MAX_MS = 85U;
+static constexpr uint16_t DM_SEARCH_DETECTION_DURATION_MAX_MS = 90U;
+static constexpr uint16_t DM_SEARCH_DETECTION_CONTACT_DURATION_MS = 180U;
 static constexpr uint16_t DM_SEARCH_DETECTION_DELAY_FAR_MS = 180U;
-static constexpr uint16_t DM_SEARCH_DETECTION_DELAY_NEAR_MS = 160U;
+static constexpr uint16_t DM_SEARCH_DETECTION_DELAY_NEAR_MS = 150U;
+
+// Radio loss diagnosis thresholds.
 static constexpr uint8_t DM_LOW_BATTERY_PERCENT = 10U;
 static constexpr uint8_t DM_BATTERY_UNKNOWN = 255U;
 static constexpr float DM_RANGE_LOSS_MIN_RATIO = 0.50F;
@@ -88,28 +116,33 @@ static constexpr float DM_COM_SATURATION_MAX_RATIO = 0.10F;
 static constexpr float DM_RSSI_GOOD_DBM = -75.0F;
 static constexpr float DM_RSSI_DEGRADING_TREND_DB_PER_S = -0.15F;
 static constexpr float DM_RSSI_STABLE_TREND_DB_PER_S = -0.05F;
+
+// Alarm tones.
 static constexpr uint16_t DM_BIP_FREQ_START_HZ = 2300U;
 static constexpr uint16_t DM_BIP_FREQ_END_HZ = 3100U;
 static constexpr uint16_t DM_BOP_FREQ_HZ = 1900U;
 static constexpr uint16_t DM_BIP_STAGE_1_MS = 70U;
 static constexpr uint16_t DM_BIP_STAGE_2_MS = 40U;
 static constexpr uint16_t DM_BOP_DURATION_MS = 220U;
+
+// Wire protocol header: magic[2], version[1], type[1], sequence[4].
 static constexpr uint8_t DM_PROTOCOL_MAGIC_0 = 0x44U;
 static constexpr uint8_t DM_PROTOCOL_MAGIC_1 = 0x4DU;
 static constexpr size_t DM_PROTOCOL_HEADER_SIZE = 8U;
-static constexpr size_t DM_ALIVE_SIZE = DM_PROTOCOL_HEADER_SIZE + 8U;
-static constexpr size_t DM_PAIR_CONFIRM_SIZE = DM_PROTOCOL_HEADER_SIZE + 9U;
-static constexpr size_t DM_POSITION_REPORT_SIZE = DM_PROTOCOL_HEADER_SIZE + 19U;
-static constexpr size_t DM_SET_INTERVAL_SIZE = DM_PROTOCOL_HEADER_SIZE + 5U;
-static constexpr size_t DM_BASE_BEACON_SIZE = DM_PROTOCOL_HEADER_SIZE + 4U;
-static constexpr size_t DM_SOS_SIZE = DM_PROTOCOL_HEADER_SIZE + 5U;
-static constexpr size_t DM_SOS_ACK_SIZE = DM_PROTOCOL_HEADER_SIZE + 8U;
-static constexpr size_t DM_NOTIFICATION_SIZE = DM_PROTOCOL_HEADER_SIZE + 4U;
-static constexpr size_t DM_NOTIFICATION_ACK_SIZE = DM_PROTOCOL_HEADER_SIZE + 8U;
-static constexpr size_t DM_SHUTDOWN_NOTICE_SIZE = DM_PROTOCOL_HEADER_SIZE + 4U;
+
+// V7 compact message sizes. Boot/session identifiers are 16-bit.
+static constexpr size_t DM_ALIVE_SIZE = DM_PROTOCOL_HEADER_SIZE + 6U;
+static constexpr size_t DM_PAIR_CONFIRM_SIZE = DM_PROTOCOL_HEADER_SIZE + 5U;
+static constexpr size_t DM_POSITION_REPORT_SIZE = DM_PROTOCOL_HEADER_SIZE + 16U;
+static constexpr size_t DM_SET_INTERVAL_SIZE = DM_PROTOCOL_HEADER_SIZE + 3U;
+static constexpr size_t DM_BASE_BEACON_SIZE = DM_PROTOCOL_HEADER_SIZE + 2U;
+static constexpr size_t DM_SOS_SIZE = DM_PROTOCOL_HEADER_SIZE + 3U;
+static constexpr size_t DM_SOS_ACK_SIZE = DM_PROTOCOL_HEADER_SIZE + 6U;
+static constexpr size_t DM_NOTIFICATION_SIZE = DM_PROTOCOL_HEADER_SIZE + 2U;
+static constexpr size_t DM_NOTIFICATION_ACK_SIZE = DM_PROTOCOL_HEADER_SIZE + 6U;
+static constexpr size_t DM_SHUTDOWN_NOTICE_SIZE = DM_PROTOCOL_HEADER_SIZE + 2U;
 static constexpr uint32_t DM_SEQUENCE_DUPLICATE_WINDOW_MS = 5U * 60U * 1000U;
 static constexpr size_t DM_RECENT_SEQUENCE_COUNT = 8U;
-static constexpr uint32_t DM_GPS_FUNCTIONAL_CHECK_MS = 60U * 1000U;
 
 struct DmDefaultMember
 {

@@ -1,8 +1,10 @@
 #include "DistanceMonitorUtils.h"
 #include "DistanceMonitorConfig.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 namespace
 {
@@ -31,7 +33,6 @@ void dmFormatBattery(uint8_t batteryPercent, char *buffer, size_t bufferSize)
 {
     if (buffer == nullptr || bufferSize == 0U)
         return;
-
     if (batteryPercent == DM_BATTERY_UNKNOWN)
         std::snprintf(buffer, bufferSize, "?");
     else
@@ -71,7 +72,6 @@ uint8_t dmComputeMaxReportIntervalSec(float maxDistanceMeters)
         DM_DESIGN_RELATIVE_SPEED_MPS * static_cast<float>(DM_MIN_SAMPLES_PER_DMAX);
     if (maxDistanceMeters <= 0.0F || denominator <= 0.0F)
         return DM_MIN_REPORT_INTERVAL_S;
-
     const float rawSeconds = maxDistanceMeters / denominator;
     const float limitedSeconds = std::min<float>(rawSeconds, DM_MAX_REPORT_INTERVAL_CAP_S);
     if (limitedSeconds <= static_cast<float>(DM_MIN_REPORT_INTERVAL_S))
@@ -93,7 +93,6 @@ uint32_t dmDistanceBipIntervalMs(float distanceRatio)
 {
     if (distanceRatio < 0.80F)
         return 0U;
-
     float seconds = 1.0F;
     if (distanceRatio < 0.90F)
         seconds = interpolate(distanceRatio, 0.80F, 30.0F, 0.90F, 22.5F);
@@ -104,6 +103,26 @@ uint32_t dmDistanceBipIntervalMs(float distanceRatio)
     else if (distanceRatio < 2.00F)
         seconds = interpolate(distanceRatio, 1.50F, 2.0F, 2.00F, 1.0F);
     return static_cast<uint32_t>(seconds * 1000.0F + 0.5F);
+}
+
+uint32_t dmBestDop(uint32_t pdop, uint32_t hdop)
+{
+    if ((pdop == 0U) && (hdop != 0U))
+        return hdop;
+
+    if ((hdop == 0U) && (pdop != 0U))
+        return pdop;
+
+    return std::min(pdop, hdop);
+}
+
+double dmAccuracyMetersFromDop(uint32_t dop)
+{
+    if (dop == 0U)
+        return std::numeric_limits<double>::infinity();
+
+    return (static_cast<double>(dop) / 100.0) *
+           static_cast<double>(DM_DOP_TO_ACCURACY_METERS);
 }
 
 const char *dmPositionKindName(DmPositionKind kind)
@@ -131,12 +150,12 @@ const char *dmDistanceBandName(DmDistanceBand band)
     {
     case DmDistanceBand::Near:
         return "Near";
-    case DmDistanceBand::Mid:
-        return "Mid";
+    case DmDistanceBand::Medium:
+        return "Medium";
     case DmDistanceBand::Warning:
         return "Warning";
-    case DmDistanceBand::Beyond:
-        return "Beyond";
+    case DmDistanceBand::VeryFar:
+        return "VeryFar";
     case DmDistanceBand::Unknown:
     default:
         return "Unknown";
