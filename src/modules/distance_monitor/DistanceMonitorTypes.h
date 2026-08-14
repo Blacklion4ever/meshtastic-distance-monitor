@@ -1,5 +1,4 @@
 #pragma once
-
 #include "DistanceMonitorConfig.h"
 #include <cstddef>
 #include <cstdint>
@@ -17,7 +16,6 @@ enum class DmPositionKind : uint8_t
 {
     NoFix = 0,
     FreshFix = 1,
-    CachedStationary = 2,
 };
 
 enum class DmDistanceSource : uint8_t
@@ -45,7 +43,6 @@ enum class DmFaultCause : uint8_t
     RadioUnexpectedLoss,
     RemoteShutdown,
     Unpaired,
-    DistanceEstimateUnavailable,
 };
 
 enum class DmSosCause : uint8_t
@@ -130,7 +127,6 @@ struct DmPendingSos
 struct DmNodeState
 {
     uint32_t nodeNum = 0U;
-    bool isLocal = false;
     bool isBase = false;
     uint32_t remoteSessionId = 0U;
     uint32_t remoteUptimeSeconds = 0U;
@@ -143,42 +139,29 @@ struct DmNodeState
     uint32_t pairedRemoteSessionId = 0U;
     uint32_t lastHandshakeTxMs = 0U;
     bool hasHandshakeTxTime = false;
-
-    uint32_t lastAnyPacketRxMs = 0U;
-    bool hasAnyPacketRxTime = false;
     uint32_t lastPositionReportRxMs = 0U;
     uint32_t lastPositionReportSequence = 0U;
     uint32_t lastIntervalEvaluationSequence = 0U;
     bool hasPositionReportRxTime = false;
     DmRadioState radioState = DmRadioState::Unknown;
-
-    uint32_t lastLinkProbeMs = 0U;
-    bool hasLinkProbeTime = false;
     DmFaultCause faultCause = DmFaultCause::None;
-    uint32_t faultStartedMs = 0U;
     uint32_t faultSnoozedUntilMs = 0U;
     uint32_t comSaturationSilentUntilMs = 0U;
     uint32_t lastFaultAudioMs = 0U;
     bool hasFaultAudioTime = false;
 
     bool shutdownNoticeReceived = false;
-    uint32_t shutdownNoticeMs = 0U;
-
     DmPositionKind positionKind = DmPositionKind::NoFix;
     int32_t latitudeI = 0;
     int32_t longitudeI = 0;
-    uint32_t positionAgeAtRxSeconds = 0U;
-    uint32_t positionRxMs = 0U;
     uint8_t appliedIntervalSec = 0U;
-    uint8_t desiredIntervalSec = 0U;
-    uint8_t batteryPercent = 0U;
+    uint8_t batteryPercent = DM_BATTERY_UNKNOWN;
     bool moving = false;
 
     bool remoteBaseRssiValid = false;
     float remoteBaseRssiMeanDbm = 0.0F;
     float remoteBaseRssiStdDb = 0.0F;
     float remoteBaseRssiTrendDbPerSec = 0.0F;
-
     DmDistanceSource distanceSource = DmDistanceSource::None;
     double distanceMeters = 0.0;
     float distanceRatio = 0.0F;
@@ -186,9 +169,7 @@ struct DmNodeState
     double lastValidDistanceMeters = 0.0;
     float lastValidDistanceRatio = 0.0F;
     uint32_t lastValidDistanceMs = 0U;
-
     DmDistanceBandEstimate rssiEstimate = {};
-    bool distanceEstimateFault = false;
     float currentDistanceAlertRatio = 0.0F;
     float activeDistanceAlertRatio = 0.0F;
     uint32_t distanceSnoozedUntilMs = 0U;
@@ -197,9 +178,7 @@ struct DmNodeState
 
     bool criticalDistanceLatch = false;
     float criticalDistanceLatchRatio = 0.0F;
-
     bool sosActive = false;
-    uint32_t activeSosSequence = 0U;
     DmSosCause activeSosCause = DmSosCause::ManualButton;
     uint32_t pendingNotificationSequence = 0U;
     uint32_t pendingNotificationSinceMs = 0U;
