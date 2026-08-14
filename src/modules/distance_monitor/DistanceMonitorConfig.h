@@ -8,7 +8,7 @@ static constexpr size_t DM_MAX_MEMBERS = 2U;
 
 // Protocol V7: 16-bit boot session IDs, compact position flags and DOP transfer.
 static constexpr uint8_t DM_PROTOCOL_VERSION = 7U;
-static constexpr const char *DM_FIRMWARE_VERSION = "1.0.0-beta6-accuracy-rssi-lut";
+static constexpr const char *DM_FIRMWARE_VERSION = "1.0.0-beta7-fall-ring";
 
 // Main scheduling cadence.
 static constexpr uint32_t DM_TICK_INTERVAL_MS = 40U;
@@ -17,7 +17,7 @@ static constexpr uint32_t DM_SUMMARY_INTERVAL_MS = 5000U;
 
 // When true, distance/radio/SOS alarm audio is muted. Alarm state, logs, radio
 // traffic, pairing/notification tones and SEARCH feedback remain active.
-static constexpr bool DM_ALARM_AUDIO_SILENT = false;
+static constexpr bool DM_ALARM_AUDIO_SILENT = true;
 
 // Status LED ergonomics.
 static constexpr bool DM_STATUS_LED_ENABLED = true;
@@ -61,14 +61,56 @@ static constexpr uint32_t DM_SHUTDOWN_TX_GRACE_MS = 500U;
 
 // Motion / SOS configuration.
 static constexpr uint32_t DM_STATIONARY_CONFIRM_MS = 10U * 1000U;
+// MOVING/STATIONARY sensitivity only; it is independent from fall detection.
 static constexpr float DM_IMU_MOTION_THRESHOLD_G = 0.08F;
 static constexpr float DM_IMU_GRAVITY_ALPHA = 0.01F;
 static constexpr float DM_HIGH_SPEED_THRESHOLD_KMH = 20.0F;
 static constexpr uint32_t DM_HIGH_SPEED_CLEAR_MS = 10U * 1000U;
-static constexpr float DM_FALL_FREEFALL_THRESHOLD_G = 0.65F;
-static constexpr float DM_FALL_IMPACT_THRESHOLD_G = 1.55F;
-static constexpr uint32_t DM_FALL_IMPACT_WINDOW_MS = 900U;
 static constexpr uint32_t DM_SOS_REARM_MS = 10U * 1000U;
+
+// Accelerometer-only fall detector. DM samples the IMU once per module tick,
+// keeps a 3 s rolling history, then analyzes three contiguous logical phases:
+// newest -> POST | IMPACT | PRE -> oldest. Ratios are expressed in percent.
+static constexpr uint32_t DM_IMU_SAMPLE_RATE_HZ = 1000U / DM_TICK_INTERVAL_MS;
+static constexpr uint32_t DM_FALL_WINDOW_TIME_MS = 3000U;
+static constexpr uint8_t DM_FALL_POST_RATIO_PERCENT = 40U;
+static constexpr uint8_t DM_FALL_IMPACT_RATIO_PERCENT = 20U;
+static constexpr uint8_t DM_FALL_PRE_RATIO_PERCENT = 40U;
+
+// Number of samples in the complete ring and in each logical phase. PRE gets
+// the remainder so integer rounding can never make the three phases overflow.
+static constexpr size_t DM_MAX_ROLL_BUFFER =
+    static_cast<size_t>((DM_FALL_WINDOW_TIME_MS * DM_IMU_SAMPLE_RATE_HZ) / 1000U);
+static constexpr size_t DM_FALL_POST_SAMPLES =
+    (DM_MAX_ROLL_BUFFER * DM_FALL_POST_RATIO_PERCENT) / 100U;
+static constexpr size_t DM_FALL_IMPACT_SAMPLES =
+    (DM_MAX_ROLL_BUFFER * DM_FALL_IMPACT_RATIO_PERCENT) / 100U;
+static constexpr size_t DM_FALL_PRE_SAMPLES =
+    DM_MAX_ROLL_BUFFER - DM_FALL_POST_SAMPLES - DM_FALL_IMPACT_SAMPLES;
+
+// Each phase has one decision statistic. These are tuning defaults, not
+// pediatric clinical thresholds: use the emitted PRE/IMP/POST statistics to
+// tune them on the actual tracker placement and activities.
+static constexpr float DM_FALL_PRE_MAX_MEAN_G = 0.70F;
+static constexpr float DM_FALL_IMPACT_MIN_RMS_G = 1.80F;
+static constexpr float DM_FALL_POST_MAX_STD_G = 0.15F;
+
+// Candidate statistics are logged immediately when the PASS mask changes,
+// then rate-limited while a candidate persists to avoid flooding the console.
+static constexpr uint32_t DM_FALL_LOG_INTERVAL_MS = 500U;
+
+static_assert((1000U % DM_TICK_INTERVAL_MS) == 0U,
+              "DM_TICK_INTERVAL_MS must divide 1000 for IMU sample rate");
+static_assert(DM_MAX_ROLL_BUFFER > 0U, "fall rolling buffer cannot be empty");
+static_assert(DM_FALL_POST_SAMPLES > 0U, "POST phase cannot be empty");
+static_assert(DM_FALL_IMPACT_SAMPLES > 0U, "IMPACT phase cannot be empty");
+static_assert(DM_FALL_PRE_SAMPLES > 0U, "PRE phase cannot be empty");
+static_assert(
+    DM_FALL_POST_RATIO_PERCENT +
+            DM_FALL_IMPACT_RATIO_PERCENT +
+            DM_FALL_PRE_RATIO_PERCENT ==
+        100U,
+    "fall phase ratios must sum to 100 percent");
 
 // GNSS is kept running continuously by DM. Native Meshtastic broadcasts stay
 // practically disabled because DM owns its own compact position protocol.

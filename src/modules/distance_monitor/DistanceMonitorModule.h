@@ -68,8 +68,18 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     uint32_t lastMotionMs_ = 0U;
     bool highSpeedSosLatched_ = false;
     uint32_t highSpeedBelowSinceMs_ = 0U;
-    bool fallFreefallArmed_ = false;
-    uint32_t fallFreefallMs_ = 0U;
+
+    // One IMU magnitude ring is shared by base and tracker fall detection.
+    // fallBufferHead_ always points to the newest physical sample; logical
+    // phase offsets are expressed as sample ages from that dynamic head.
+    float fallMagnitudeBuffer_[DM_MAX_ROLL_BUFFER] = {};
+    size_t fallBufferHead_ = 0U;
+    size_t fallBufferCount_ = 0U;
+    uint8_t lastFallPassMask_ = 0U;
+    uint32_t lastFallStatsLogMs_ = 0U;
+    bool hasFallStatsLogTime_ = false;
+    bool localFallDetected_ = false;
+    uint32_t localFallDetectedMs_ = 0U;
 
     uint32_t localFixMs_ = 0U;
     uint32_t lastGpsSolutionId_ = 0U;
@@ -140,7 +150,21 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     uint32_t localFixAgeSeconds(uint32_t nowMs) const;
     uint32_t freshFixMaxAgeSeconds() const;
     void copyLocalPositionToState(DmNodeState &localState, uint32_t nowMs) const;
-    void updateFallDetection(uint32_t nowMs, float rawNormG);
+
+    // Push one magnitude into the ring and evaluate the three logical windows
+    // once the complete PRE+IMPACT+POST history is available.
+    void updateFallDetection(DmNodeState &localState, uint32_t nowMs, float rawNormG);
+    size_t fallBufferIndexFromAge(size_t age) const;
+    DmFallPhaseStats analyzeFallPhase(size_t startAge, size_t sampleCount) const;
+    void logFallAnalysis(
+        uint32_t nowMs,
+        const DmFallPhaseStats &pre,
+        const DmFallPhaseStats &impact,
+        const DmFallPhaseStats &post,
+        bool prePass,
+        bool impactPass,
+        bool postPass);
+    void handleLocalFallDetected(DmNodeState &localState, uint32_t nowMs);
     void triggerLocalSos(DmSosCause cause);
 
     uint32_t allocateSequenceNumber();

@@ -126,6 +126,16 @@ struct DmPendingSos
     uint32_t lastTxMs = 0U;
 };
 
+// Descriptive statistics for one logical fall-analysis phase. All three are
+// computed for logging, while each phase uses only its configured decision
+// statistic: PRE=mean, IMPACT=RMS, POST=standard deviation.
+struct DmFallPhaseStats
+{
+    float meanG = 0.0F;
+    float stdG = 0.0F;
+    float rmsG = 0.0F;
+};
+
 struct DmNodeState
 {
     uint32_t nodeNum = 0U;

@@ -23,12 +23,12 @@ bool deadlinePending(uint32_t nowMs, uint32_t deadlineMs)
 
 const char *localMotionName(
     bool moving,
-    bool fallArmed,
+    bool fallDetected,
     bool highSpeedLatched)
 {
     if (highSpeedLatched)
         return "IN_VEHICLE";
-    if (fallArmed)
+    if (fallDetected)
         return "FALL";
     return moving ? "MOVING" : "STATIONARY";
 }
@@ -590,10 +590,19 @@ void DistanceMonitorModule::processRemoteMember(
                 DM_RSSI_WARNING_ALERT_RATIO,
                 runtimeConfig_.maxDistanceMeters);
             break;
-        case DmDistanceBand::Near:
         case DmDistanceBand::Medium:
+            desired = dmComputeReportIntervalSec(
+                DM_RSSI_WARNING_ALERT_RATIO*0.5F,
+                runtimeConfig_.maxDistanceMeters);
+            break;
+        case DmDistanceBand::Near:
+            desired = dmComputeReportIntervalSec(
+                DM_RSSI_WARNING_ALERT_RATIO*0.25F,
+                runtimeConfig_.maxDistanceMeters);
+            break;
         case DmDistanceBand::Unknown:
         default:
+            desired = DM_MIN_REPORT_INTERVAL_S;
             break;
         }
     }
@@ -1071,7 +1080,7 @@ void DistanceMonitorModule::updateBaseAudio(
         return;
     }
 
-    bool hasSos = false;
+    bool hasSos = localFallDetected_;
     for (size_t index = 0U;
          index < runtimeConfig_.memberCount;
          ++index)
@@ -1289,6 +1298,13 @@ bool DistanceMonitorModule::handleSingleButtonPress()
     const uint32_t nowMs = millis();
 
     bool hadSos = false;
+
+    if (localFallDetected_)
+    {
+        localFallDetected_ = false;
+        hadSos = true;
+    }
+
     for (size_t index = 0U;
          index < runtimeConfig_.memberCount;
          ++index)
@@ -1450,7 +1466,7 @@ void DistanceMonitorModule::logSummary(
             localBattery,
             localMotionName(
                 localMoving_,
-                fallFreefallArmed_,
+                localFallDetected_,
                 highSpeedSosLatched_));
     }
     else
@@ -1462,7 +1478,7 @@ void DistanceMonitorModule::logSummary(
             localBattery,
             localMotionName(
                 localMoving_,
-                fallFreefallArmed_,
+                localFallDetected_,
                 highSpeedSosLatched_));
     }
 

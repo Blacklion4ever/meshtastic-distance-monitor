@@ -16,6 +16,347 @@
 #include <cmath>
 #include <limits>
 
+namespace
+{
+struct DmImuCalibration
+{
+    NodeNum nodeNum;
+    const char *name;
+    bool valid;
+    float offsetX;
+    float gainX;
+    float offsetY;
+    float gainY;
+    float offsetZ;
+    float gainZ;
+};
+
+// Calibrations are tied to the physical nodeNum, never to BASE/TRACKER role.
+// Corrected acceleration is:
+//
+//   a_cal = (a_raw - offset) * gain
+//
+// valid=false means: automatically launch the six-face calibration at boot.
+// Once calibration completes, the entry is updated in RAM and valid becomes
+// true. The final coefficients are logged so they can be copied back here to
+// make the calibration permanent across future reboots.
+static DmImuCalibration DM_IMU_CALIBRATIONS[] = {
+    {
+        0x8b3a4a14U,
+        "base",
+        true,
+        -1.1447143F, 1.0388839F,
+        -0.3513750F, 1.0003751F,
+         0.4158636F, 1.0951267F,
+    },
+    {
+        0xe87c9792U,
+        "tracker",
+        true,
+         0.2682259F, 1.0301051F,
+         0.7196746F, 1.0148181F,
+        -0.3300820F, 1.0806831F,
+    },
+};
+
+static constexpr uint16_t DM_IMU_CAL_STABLE_SAMPLES = 25U;
+static constexpr float DM_IMU_CAL_MAX_SAMPLE_DELTA = 0.040F;
+static constexpr float DM_IMU_CAL_MIN_AXIS_SPAN = 1.75F;
+static constexpr float DM_IMU_CAL_MAX_AXIS_SPAN = 2.50F;
+static constexpr uint32_t DM_IMU_CAL_PROGRESS_LOG_MS = 1500U;
+
+struct DmImuAutoCalibrationState
+{
+    NodeNum nodeNum = 0U;
+    bool active = false;
+    bool announced = false;
+    bool hasLastSample = false;
+
+    float lastX = 0.0F;
+    float lastY = 0.0F;
+    float lastZ = 0.0F;
+
+    float sumX = 0.0F;
+    float sumY = 0.0F;
+    float sumZ = 0.0F;
+    float anchorX = 0.0F;
+    float anchorY = 0.0F;
+    float anchorZ = 0.0F;
+    uint16_t stableSamples = 0U;
+
+    bool haveExtrema = false;
+    float minX = 0.0F;
+    float maxX = 0.0F;
+    float minY = 0.0F;
+    float maxY = 0.0F;
+    float minZ = 0.0F;
+    float maxZ = 0.0F;
+
+    uint32_t lastProgressLogMs = 0U;
+};
+
+static DmImuAutoCalibrationState dmImuAutoCal;
+
+static DmImuCalibration *dmFindImuCalibration(NodeNum nodeNum)
+{
+    for (size_t i = 0U;
+         i < sizeof(DM_IMU_CALIBRATIONS) / sizeof(DM_IMU_CALIBRATIONS[0]);
+         ++i)
+    {
+        if (DM_IMU_CALIBRATIONS[i].nodeNum == nodeNum)
+            return &DM_IMU_CALIBRATIONS[i];
+    }
+
+    return nullptr;
+}
+
+static void dmResetImuAutoCalibration(NodeNum nodeNum)
+{
+    dmImuAutoCal = DmImuAutoCalibrationState{};
+    dmImuAutoCal.nodeNum = nodeNum;
+    dmImuAutoCal.active = true;
+}
+
+static bool dmImuCalibrationInProgress(NodeNum nodeNum)
+{
+    return dmImuAutoCal.active && dmImuAutoCal.nodeNum == nodeNum;
+}
+
+static void dmResetStableWindow()
+{
+    dmImuAutoCal.sumX = 0.0F;
+    dmImuAutoCal.sumY = 0.0F;
+    dmImuAutoCal.sumZ = 0.0F;
+    dmImuAutoCal.anchorX = 0.0F;
+    dmImuAutoCal.anchorY = 0.0F;
+    dmImuAutoCal.anchorZ = 0.0F;
+    dmImuAutoCal.stableSamples = 0U;
+}
+
+static void dmAcceptStablePlateau(float x, float y, float z)
+{
+    if (!dmImuAutoCal.haveExtrema)
+    {
+        dmImuAutoCal.minX = dmImuAutoCal.maxX = x;
+        dmImuAutoCal.minY = dmImuAutoCal.maxY = y;
+        dmImuAutoCal.minZ = dmImuAutoCal.maxZ = z;
+        dmImuAutoCal.haveExtrema = true;
+        return;
+    }
+
+    dmImuAutoCal.minX = std::min(dmImuAutoCal.minX, x);
+    dmImuAutoCal.maxX = std::max(dmImuAutoCal.maxX, x);
+    dmImuAutoCal.minY = std::min(dmImuAutoCal.minY, y);
+    dmImuAutoCal.maxY = std::max(dmImuAutoCal.maxY, y);
+    dmImuAutoCal.minZ = std::min(dmImuAutoCal.minZ, z);
+    dmImuAutoCal.maxZ = std::max(dmImuAutoCal.maxZ, z);
+}
+
+static bool dmAxisSpanReady(float span)
+{
+    return std::isfinite(span) &&
+           span >= DM_IMU_CAL_MIN_AXIS_SPAN &&
+           span <= DM_IMU_CAL_MAX_AXIS_SPAN;
+}
+
+static bool dmTryFinishImuAutoCalibration(
+    DmImuCalibration &cal,
+    uint32_t nowMs)
+{
+    if (!dmImuAutoCal.haveExtrema)
+        return false;
+
+    const float spanX = dmImuAutoCal.maxX - dmImuAutoCal.minX;
+    const float spanY = dmImuAutoCal.maxY - dmImuAutoCal.minY;
+    const float spanZ = dmImuAutoCal.maxZ - dmImuAutoCal.minZ;
+
+    const bool xReady = dmAxisSpanReady(spanX);
+    const bool yReady = dmAxisSpanReady(spanY);
+    const bool zReady = dmAxisSpanReady(spanZ);
+
+    if (!xReady || !yReady || !zReady)
+    {
+        if (dmImuAutoCal.lastProgressLogMs == 0U ||
+            dmElapsedMs(nowMs, dmImuAutoCal.lastProgressLogMs) >=
+                DM_IMU_CAL_PROGRESS_LOG_MS)
+        {
+            dmImuAutoCal.lastProgressLogMs = nowMs;
+            LOG_INFO(
+                "{IMU_CAL} id=!%08lx progress X=%s %.3f Y=%s %.3f Z=%s %.3f",
+                static_cast<unsigned long>(cal.nodeNum),
+                xReady ? "OK" : "WAIT",
+                static_cast<double>(spanX),
+                yReady ? "OK" : "WAIT",
+                static_cast<double>(spanY),
+                zReady ? "OK" : "WAIT",
+                static_cast<double>(spanZ));
+        }
+        return false;
+    }
+
+    cal.offsetX = 0.5F * (dmImuAutoCal.maxX + dmImuAutoCal.minX);
+    cal.offsetY = 0.5F * (dmImuAutoCal.maxY + dmImuAutoCal.minY);
+    cal.offsetZ = 0.5F * (dmImuAutoCal.maxZ + dmImuAutoCal.minZ);
+
+    cal.gainX = 2.0F / spanX;
+    cal.gainY = 2.0F / spanY;
+    cal.gainZ = 2.0F / spanZ;
+
+    if (!std::isfinite(cal.offsetX) || !std::isfinite(cal.offsetY) ||
+        !std::isfinite(cal.offsetZ) || !std::isfinite(cal.gainX) ||
+        !std::isfinite(cal.gainY) || !std::isfinite(cal.gainZ))
+    {
+        LOG_ERROR(
+            "{IMU_CAL} id=!%08lx invalid result; restarting calibration",
+            static_cast<unsigned long>(cal.nodeNum));
+        dmResetImuAutoCalibration(cal.nodeNum);
+        return false;
+    }
+
+    cal.valid = true;
+    dmImuAutoCal.active = false;
+
+    LOG_INFO(
+        "{IMU_CAL} DONE id=!%08lx name=%s",
+        static_cast<unsigned long>(cal.nodeNum),
+        cal.name);
+    LOG_INFO(
+        "{IMU_CAL} offsetX=%.7f gainX=%.7f offsetY=%.7f gainY=%.7f offsetZ=%.7f gainZ=%.7f",
+        static_cast<double>(cal.offsetX),
+        static_cast<double>(cal.gainX),
+        static_cast<double>(cal.offsetY),
+        static_cast<double>(cal.gainY),
+        static_cast<double>(cal.offsetZ),
+        static_cast<double>(cal.gainZ));
+    LOG_INFO(
+        "{IMU_CAL} table: {!%08lx, valid=true, %.7f, %.7f, %.7f, %.7f, %.7f, %.7f}",
+        static_cast<unsigned long>(cal.nodeNum),
+        static_cast<double>(cal.offsetX),
+        static_cast<double>(cal.gainX),
+        static_cast<double>(cal.offsetY),
+        static_cast<double>(cal.gainY),
+        static_cast<double>(cal.offsetZ),
+        static_cast<double>(cal.gainZ));
+
+    return true;
+}
+
+static bool dmUpdateImuAutoCalibration(
+    DmImuCalibration &cal,
+    float rawX,
+    float rawY,
+    float rawZ,
+    uint32_t nowMs)
+{
+    if (!dmImuCalibrationInProgress(cal.nodeNum))
+        dmResetImuAutoCalibration(cal.nodeNum);
+
+    if (!dmImuAutoCal.announced)
+    {
+        dmImuAutoCal.announced = true;
+        LOG_WARN(
+            "{IMU_CAL} START id=!%08lx name=%s - place device successively on all 6 faces",
+            static_cast<unsigned long>(cal.nodeNum),
+            cal.name);
+    }
+
+    if (!dmImuAutoCal.hasLastSample)
+    {
+        dmImuAutoCal.lastX = rawX;
+        dmImuAutoCal.lastY = rawY;
+        dmImuAutoCal.lastZ = rawZ;
+        dmImuAutoCal.hasLastSample = true;
+        dmResetStableWindow();
+        return false;
+    }
+
+    const float dx = rawX - dmImuAutoCal.lastX;
+    const float dy = rawY - dmImuAutoCal.lastY;
+    const float dz = rawZ - dmImuAutoCal.lastZ;
+    const float sampleDelta = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    dmImuAutoCal.lastX = rawX;
+    dmImuAutoCal.lastY = rawY;
+    dmImuAutoCal.lastZ = rawZ;
+
+    if (!std::isfinite(sampleDelta) ||
+        sampleDelta > DM_IMU_CAL_MAX_SAMPLE_DELTA)
+    {
+        dmResetStableWindow();
+        return false;
+    }
+
+    if (dmImuAutoCal.stableSamples == 0U)
+    {
+        dmImuAutoCal.anchorX = rawX;
+        dmImuAutoCal.anchorY = rawY;
+        dmImuAutoCal.anchorZ = rawZ;
+    }
+
+    const float anchorDx = rawX - dmImuAutoCal.anchorX;
+    const float anchorDy = rawY - dmImuAutoCal.anchorY;
+    const float anchorDz = rawZ - dmImuAutoCal.anchorZ;
+    const float anchorDelta = std::sqrt(
+        anchorDx * anchorDx +
+        anchorDy * anchorDy +
+        anchorDz * anchorDz);
+
+    if (!std::isfinite(anchorDelta) ||
+        anchorDelta > DM_IMU_CAL_MAX_SAMPLE_DELTA)
+    {
+        dmResetStableWindow();
+        return false;
+    }
+
+    dmImuAutoCal.sumX += rawX;
+    dmImuAutoCal.sumY += rawY;
+    dmImuAutoCal.sumZ += rawZ;
+    ++dmImuAutoCal.stableSamples;
+
+    if (dmImuAutoCal.stableSamples < DM_IMU_CAL_STABLE_SAMPLES)
+        return false;
+
+    const float invCount =
+        1.0F / static_cast<float>(dmImuAutoCal.stableSamples);
+    const float avgX = dmImuAutoCal.sumX * invCount;
+    const float avgY = dmImuAutoCal.sumY * invCount;
+    const float avgZ = dmImuAutoCal.sumZ * invCount;
+
+    dmAcceptStablePlateau(avgX, avgY, avgZ);
+
+    LOG_INFO(
+        "{IMU_CAL} plateau id=!%08lx x=%.3f y=%.3f z=%.3f",
+        static_cast<unsigned long>(cal.nodeNum),
+        static_cast<double>(avgX),
+        static_cast<double>(avgY),
+        static_cast<double>(avgZ));
+
+    dmResetStableWindow();
+    return dmTryFinishImuAutoCalibration(cal, nowMs);
+}
+
+static bool dmCalibrateImuSample(
+    const DmImuCalibration &cal,
+    float rawX,
+    float rawY,
+    float rawZ,
+    float &calX,
+    float &calY,
+    float &calZ)
+{
+    if (!cal.valid)
+        return false;
+
+    calX = (rawX - cal.offsetX) * cal.gainX;
+    calY = (rawY - cal.offsetY) * cal.gainY;
+    calZ = (rawZ - cal.offsetZ) * cal.gainZ;
+
+    return std::isfinite(calX) &&
+           std::isfinite(calY) &&
+           std::isfinite(calZ);
+}
+} // namespace
+
 void DistanceMonitorModule::startLocalPositionManager(uint32_t nowMs)
 {
     localPositionStarted_ = true;
@@ -43,7 +384,6 @@ void DistanceMonitorModule::startLocalPositionManager(uint32_t nowMs)
         return;
     }
 
-    // Distance Monitor owns the GNSS cadence and keeps it continuously enabled.
     ensureGpsAlwaysOn(nowMs, true);
 #endif
 }
@@ -96,6 +436,7 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
         lastGpsFunctionalCheckMs_ == 0U ||
         dmElapsedMs(nowMs, lastGpsFunctionalCheckMs_) >=
             DM_GPS_FUNCTIONAL_CHECK_MS;
+
     if (!diagnosticDue)
         return;
 
@@ -106,10 +447,7 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
     const uint32_t hdop = localPosition.HDOP;
     const uint32_t dop = dmBestDop(pdop, hdop);
     const double accuracyM = dmAccuracyMetersFromDop(dop);
-    const bool flow =
-        sats != 0U ||
-        pdop != 0U ||
-        hdop != 0U;
+    const bool flow = sats != 0U || pdop != 0U || hdop != 0U;
 
     const bool effectiveStateOn =
         config.position.gps_mode ==
@@ -149,7 +487,7 @@ bool DistanceMonitorModule::readImuSample(
     float &rawNormG)
 {
     motionDetected = false;
-    rawNormG = 1.0F;
+    rawNormG = 0.0F;
 
 #if !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_I2C && defined(HAS_QMA6100P)
     QMA6100PSingleton *sensor = QMA6100PSingleton::GetInstance();
@@ -160,34 +498,115 @@ bool DistanceMonitorModule::readImuSample(
     if (!sensor->getAccelData(&sample))
         return false;
 
-    rawNormG = std::sqrt(
-        sample.xData * sample.xData +
-        sample.yData * sample.yData +
-        sample.zData * sample.zData);
+    if (!std::isfinite(sample.xData) ||
+        !std::isfinite(sample.yData) ||
+        !std::isfinite(sample.zData))
+    {
+        return false;
+    }
 
+    if (nodeDB == nullptr)
+        return false;
+
+    const NodeNum localNodeNum = nodeDB->getNodeNum();
+    DmImuCalibration *cal = dmFindImuCalibration(localNodeNum);
+
+    static NodeNum calibrationLogNode = 0U;
+    static bool calibrationLogValid = false;
+
+    if (cal == nullptr)
+    {
+        if (!calibrationLogValid || calibrationLogNode != localNodeNum)
+        {
+            calibrationLogNode = localNodeNum;
+            calibrationLogValid = true;
+            LOG_ERROR(
+                "{IMU_CAL} no table entry for id=!%08lx",
+                static_cast<unsigned long>(localNodeNum));
+        }
+        return false;
+    }
+
+    // valid=false is not an error. It deliberately starts automatic six-face
+    // calibration. While calibrating, FALL/MOVING are not fed with raw values.
+    if (!cal->valid)
+    {
+        const bool justCompleted = dmUpdateImuAutoCalibration(
+            *cal,
+            sample.xData,
+            sample.yData,
+            sample.zData,
+            millis());
+
+        if (!justCompleted)
+            return false;
+
+        // A freshly completed calibration starts from a clean gravity vector.
+        gravityReferenceValid_ = false;
+    }
+
+    if (!calibrationLogValid || calibrationLogNode != localNodeNum)
+    {
+        calibrationLogNode = localNodeNum;
+        calibrationLogValid = true;
+        LOG_INFO(
+            "{IMU} calibration id=!%08lx name=%s mode=6face",
+            static_cast<unsigned long>(localNodeNum),
+            cal->name);
+    }
+
+    float ax = 0.0F;
+    float ay = 0.0F;
+    float az = 0.0F;
+    if (!dmCalibrateImuSample(
+            *cal,
+            sample.xData,
+            sample.yData,
+            sample.zData,
+            ax,
+            ay,
+            az))
+    {
+        return false;
+    }
+
+    const float calibratedNormG = std::sqrt(
+        ax * ax + ay * ay + az * az);
+
+    if (!std::isfinite(calibratedNormG))
+        return false;
+
+    // FALL works on calibrated absolute acceleration magnitude:
+    // static ~= 1 g, free fall -> 0 g, impact > 1 g.
+    rawNormG = calibratedNormG;
+
+    // MOVING/STATIONARY uses the calibrated vector and a slowly tracked
+    // gravity reference.
     if (!gravityReferenceValid_)
     {
-        gravityX_ = sample.xData;
-        gravityY_ = sample.yData;
-        gravityZ_ = sample.zData;
+        gravityX_ = ax;
+        gravityY_ = ay;
+        gravityZ_ = az;
         gravityReferenceValid_ = true;
+        motionDetected = false;
         return true;
     }
 
-    // Follow gravity slowly so short accelerations remain movement events.
-    gravityX_ += DM_IMU_GRAVITY_ALPHA * (sample.xData - gravityX_);
-    gravityY_ += DM_IMU_GRAVITY_ALPHA * (sample.yData - gravityY_);
-    gravityZ_ += DM_IMU_GRAVITY_ALPHA * (sample.zData - gravityZ_);
+    gravityX_ += DM_IMU_GRAVITY_ALPHA * (ax - gravityX_);
+    gravityY_ += DM_IMU_GRAVITY_ALPHA * (ay - gravityY_);
+    gravityZ_ += DM_IMU_GRAVITY_ALPHA * (az - gravityZ_);
 
-    const float dynamicX = sample.xData - gravityX_;
-    const float dynamicY = sample.yData - gravityY_;
-    const float dynamicZ = sample.zData - gravityZ_;
+    const float dynamicX = ax - gravityX_;
+    const float dynamicY = ay - gravityY_;
+    const float dynamicZ = az - gravityZ_;
     const float dynamicNormG = std::sqrt(
         dynamicX * dynamicX +
         dynamicY * dynamicY +
         dynamicZ * dynamicZ);
 
-    motionDetected = dynamicNormG >= DM_IMU_MOTION_THRESHOLD_G;
+    motionDetected =
+        dynamicNormG >= DM_IMU_MOTION_THRESHOLD_G;
+
     return true;
 #else
     return false;
@@ -208,7 +627,6 @@ uint32_t DistanceMonitorModule::currentGpsSolutionId() const
     if (position.time != 0U)
         return position.time;
 
-    // A content fingerprint handles producers that publish no timestamp.
     uint32_t hash = 2166136261U;
     const auto mix = [&hash](uint32_t value)
     {
@@ -241,8 +659,6 @@ bool DistanceMonitorModule::readNewUsableGpsPosition()
         return false;
     }
 
-    // DM uses actual coordinates + DOP and lets the distance layer decide
-    // whether the resulting accuracy is sufficient.
     const uint32_t dop = dmBestDop(position.PDOP, position.HDOP);
     if (dop == 0U)
         return false;
@@ -264,15 +680,19 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
     if (gps == nullptr)
         return;
 
-    const bool acquired = localPositionKind_ == DmPositionKind::NoFix;
+    const bool acquired =
+        localPositionKind_ == DmPositionKind::NoFix;
+
     localFix_ = localPosition;
     localFixMs_ = nowMs;
     localPositionKind_ = DmPositionKind::FreshFix;
 
     if (acquired)
     {
-        const uint32_t dop = dmBestDop(localFix_.PDOP, localFix_.HDOP);
+        const uint32_t dop =
+            dmBestDop(localFix_.PDOP, localFix_.HDOP);
         const double accuracyM = dmAccuracyMetersFromDop(dop);
+
         LOG_INFO(
             "{GPS} fix sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
             static_cast<unsigned long>(localFix_.sats_in_view),
@@ -285,7 +705,9 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
     if (!localFix_.has_ground_speed)
         return;
 
-    const float speedKmh = static_cast<float>(localFix_.ground_speed) * 3.6F;
+    const float speedKmh =
+        static_cast<float>(localFix_.ground_speed) * 3.6F;
+
     if (speedKmh > DM_HIGH_SPEED_THRESHOLD_KMH)
     {
         highSpeedBelowSinceMs_ = 0U;
@@ -315,6 +737,7 @@ uint32_t DistanceMonitorModule::localFixAgeSeconds(uint32_t nowMs) const
 {
     if (localPositionKind_ == DmPositionKind::NoFix)
         return 0U;
+
     return dmElapsedMs(nowMs, localFixMs_) / 1000U;
 }
 
@@ -325,8 +748,10 @@ uint32_t DistanceMonitorModule::freshFixMaxAgeSeconds() const
 
 void DistanceMonitorModule::copyLocalPositionToState(
     DmNodeState &localState,
-    uint32_t) const
+    uint32_t nowMs) const
 {
+    (void)nowMs;
+
     localState.positionKind = localPositionKind_;
     localState.moving = localMoving_;
 
@@ -336,46 +761,224 @@ void DistanceMonitorModule::copyLocalPositionToState(
         localState.longitudeI = 0;
         localState.positionDop = 0U;
         localState.positionAccuracyMeters =
-            std::numeric_limits<double>::infinity();
+            std::numeric_limits<float>::infinity();
         return;
     }
 
     localState.latitudeI = localFix_.latitude_i;
     localState.longitudeI = localFix_.longitude_i;
-
-    const uint32_t dop = dmBestDop(localFix_.PDOP, localFix_.HDOP);
     localState.positionDop = static_cast<uint16_t>(
-        std::min<uint32_t>(dop, static_cast<uint32_t>(UINT16_MAX)));
-    localState.positionAccuracyMeters =
-        dmAccuracyMetersFromDop(localState.positionDop);
+        std::min<uint32_t>(
+            dmBestDop(localFix_.PDOP, localFix_.HDOP),
+            UINT16_MAX));
+    localState.positionAccuracyMeters = static_cast<float>(
+        dmAccuracyMetersFromDop(localState.positionDop));
+}
+
+size_t DistanceMonitorModule::fallBufferIndexFromAge(size_t age) const
+{
+    if (DM_MAX_ROLL_BUFFER == 0U)
+        return 0U;
+
+    age %= DM_MAX_ROLL_BUFFER;
+    return (fallBufferHead_ + DM_MAX_ROLL_BUFFER - age) %
+           DM_MAX_ROLL_BUFFER;
+}
+
+DmFallPhaseStats DistanceMonitorModule::analyzeFallPhase(
+    size_t startAge,
+    size_t sampleCount) const
+{
+    DmFallPhaseStats stats{};
+    if (sampleCount == 0U ||
+        fallBufferCount_ < DM_MAX_ROLL_BUFFER)
+    {
+        return stats;
+    }
+
+    double sum = 0.0;
+    double sumSq = 0.0;
+
+    for (size_t offset = 0U; offset < sampleCount; ++offset)
+    {
+        const size_t index =
+            fallBufferIndexFromAge(startAge + offset);
+        const double magnitudeG =
+            static_cast<double>(fallMagnitudeBuffer_[index]);
+
+        sum += magnitudeG;
+        sumSq += magnitudeG * magnitudeG;
+    }
+
+    const double count = static_cast<double>(sampleCount);
+    const double mean = sum / count;
+    const double meanSq = sumSq / count;
+    const double variance =
+        std::max(0.0, meanSq - mean * mean);
+
+    stats.meanG = static_cast<float>(mean);
+    stats.stdG = static_cast<float>(std::sqrt(variance));
+    stats.rmsG = static_cast<float>(std::sqrt(meanSq));
+    return stats;
+}
+
+void DistanceMonitorModule::logFallAnalysis(
+    uint32_t nowMs,
+    const DmFallPhaseStats &pre,
+    const DmFallPhaseStats &impact,
+    const DmFallPhaseStats &post,
+    bool prePass,
+    bool impactPass,
+    bool postPass)
+{
+    const uint8_t passMask =
+        (prePass ? 0x01U : 0U) |
+        (impactPass ? 0x02U : 0U) |
+        (postPass ? 0x04U : 0U);
+
+    if (passMask == 0U)
+    {
+        lastFallPassMask_ = 0U;
+        return;
+    }
+
+    const bool logDue =
+        passMask != lastFallPassMask_ ||
+        !hasFallStatsLogTime_ ||
+        dmElapsedMs(nowMs, lastFallStatsLogMs_) >=
+            DM_FALL_LOG_INTERVAL_MS;
+
+    lastFallPassMask_ = passMask;
+    if (!logDue)
+        return;
+
+    lastFallStatsLogMs_ = nowMs;
+    hasFallStatsLogTime_ = true;
+
+    LOG_INFO(
+        "{FALL} PRE  [%s] mean=%.2f std=%.2f rms=%.2f",
+        prePass ? "PASS" : "NO",
+        static_cast<double>(pre.meanG),
+        static_cast<double>(pre.stdG),
+        static_cast<double>(pre.rmsG));
+
+    LOG_INFO(
+        "{FALL} IMP  [%s] mean=%.2f std=%.2f rms=%.2f",
+        impactPass ? "PASS" : "NO",
+        static_cast<double>(impact.meanG),
+        static_cast<double>(impact.stdG),
+        static_cast<double>(impact.rmsG));
+
+    LOG_INFO(
+        "{FALL} POST [%s] mean=%.2f std=%.2f rms=%.2f",
+        postPass ? "PASS" : "NO",
+        static_cast<double>(post.meanG),
+        static_cast<double>(post.stdG),
+        static_cast<double>(post.rmsG));
+}
+
+void DistanceMonitorModule::handleLocalFallDetected(
+    DmNodeState &localState,
+    uint32_t nowMs)
+{
+    if (localFallDetected_)
+        return;
+
+    localFallDetected_ = true;
+    localFallDetectedMs_ = nowMs;
+
+    LOG_WARN(
+        "{FALL} DETECTED role=%s silent=%s",
+        localState.isBase ? "BASE" : "TRACKER",
+        DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
+
+    if (localState.isBase)
+    {
+        if (!DM_ALARM_AUDIO_SILENT && !audio_.startSos())
+            LOG_ERROR("{Alarm} Cause=FALL buzzer unavailable");
+        return;
+    }
+
+    triggerLocalSos(DmSosCause::FallDetected);
 }
 
 void DistanceMonitorModule::updateFallDetection(
+    DmNodeState &localState,
     uint32_t nowMs,
     float rawNormG)
 {
-    if (!fallFreefallArmed_)
+    if (localFallDetected_ &&
+        !localState.isBase &&
+        dmElapsedMs(nowMs, localFallDetectedMs_) >=
+            DM_SOS_REARM_MS)
     {
-        if (rawNormG < DM_FALL_FREEFALL_THRESHOLD_G)
-        {
-            fallFreefallArmed_ = true;
-            fallFreefallMs_ = nowMs;
-        }
-        return;
+        localFallDetected_ = false;
     }
 
-    const uint32_t elapsed = dmElapsedMs(nowMs, fallFreefallMs_);
-    if (elapsed > DM_FALL_IMPACT_WINDOW_MS)
+    if (fallBufferCount_ == 0U)
     {
-        fallFreefallArmed_ = false;
-        return;
+        fallBufferHead_ = 0U;
+    }
+    else
+    {
+        fallBufferHead_ =
+            (fallBufferHead_ + 1U) % DM_MAX_ROLL_BUFFER;
     }
 
-    if (rawNormG > DM_FALL_IMPACT_THRESHOLD_G)
-    {
-        fallFreefallArmed_ = false;
-        triggerLocalSos(DmSosCause::FallDetected);
-    }
+    fallMagnitudeBuffer_[fallBufferHead_] = rawNormG;
+
+    if (fallBufferCount_ < DM_MAX_ROLL_BUFFER)
+        ++fallBufferCount_;
+
+    if (fallBufferCount_ < DM_MAX_ROLL_BUFFER)
+        return;
+
+    // Logical time is measured backward from the dynamic ring head:
+    //
+    // now                                                   past
+    // 0 s                                                    3 s
+    // |---------------------------------------------------------|
+    // [      POST      ][ IMPACT ][           PRE               ]
+    // ^                  ^        ^
+    // age 0              age POST age POST+IMPACT
+    const size_t postStartAge = 0U;
+    const size_t impactStartAge = DM_FALL_POST_SAMPLES;
+    const size_t preStartAge =
+        DM_FALL_POST_SAMPLES + DM_FALL_IMPACT_SAMPLES;
+
+    const DmFallPhaseStats post = analyzeFallPhase(
+        postStartAge,
+        DM_FALL_POST_SAMPLES);
+
+    const DmFallPhaseStats impact = analyzeFallPhase(
+        impactStartAge,
+        DM_FALL_IMPACT_SAMPLES);
+
+    const DmFallPhaseStats pre = analyzeFallPhase(
+        preStartAge,
+        DM_FALL_PRE_SAMPLES);
+
+    // One intentionally simple decision statistic per phase.
+    const bool prePass =
+        pre.meanG <= DM_FALL_PRE_MAX_MEAN_G;
+
+    const bool impactPass =
+        impact.rmsG >= DM_FALL_IMPACT_MIN_RMS_G;
+
+    const bool postPass =
+        post.stdG <= DM_FALL_POST_MAX_STD_G;
+
+    logFallAnalysis(
+        nowMs,
+        pre,
+        impact,
+        post,
+        prePass,
+        impactPass,
+        postPass);
+
+    if (prePass && impactPass && postPass)
+        handleLocalFallDetected(localState, nowMs);
 }
 
 void DistanceMonitorModule::sampleLocalImu(
@@ -384,22 +987,49 @@ void DistanceMonitorModule::sampleLocalImu(
 {
     bool motionDetected = false;
     float rawNormG = 1.0F;
-    const bool imuOk = readImuSample(motionDetected, rawNormG);
+
+    const bool imuOk =
+        readImuSample(motionDetected, rawNormG);
 
     if (!imuOk)
     {
-        if (imuAvailable_ || !imuWarningLogged_)
-            LOG_WARN("{IMU} unavailable");
+#if !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_I2C && defined(HAS_QMA6100P)
+        const NodeNum localNodeNum =
+            nodeDB != nullptr ? nodeDB->getNodeNum() : 0U;
+        const bool calibrating =
+            localNodeNum != 0U &&
+            dmImuCalibrationInProgress(localNodeNum);
+#else
+        const bool calibrating = false;
+#endif
+
+        if (!calibrating)
+        {
+            if (imuAvailable_ || !imuWarningLogged_)
+                LOG_WARN("{IMU} unavailable");
+            imuWarningLogged_ = true;
+        }
+        else
+        {
+            // Calibration requires static plateaus. Keep the node in MOVING
+            // state and keep FALL completely disabled until valid=true.
+            imuWarningLogged_ = false;
+        }
+
         imuAvailable_ = false;
-        imuWarningLogged_ = true;
         gravityReferenceValid_ = false;
+        fallBufferCount_ = 0U;
+        fallBufferHead_ = 0U;
+        lastFallPassMask_ = 0U;
+        hasFallStatsLogTime_ = false;
+
         localMoving_ = true;
         localState.moving = true;
         return;
     }
 
     if (!imuAvailable_)
-        LOG_INFO("{IMU} ready");
+        LOG_INFO("{IMU} ready calibration=node-table");
 
     imuAvailable_ = true;
     imuWarningLogged_ = false;
@@ -409,23 +1039,25 @@ void DistanceMonitorModule::sampleLocalImu(
         lastMotionMs_ = nowMs;
         localMoving_ = true;
     }
-    else if (dmElapsedMs(nowMs, lastMotionMs_) >= DM_STATIONARY_CONFIRM_MS)
+    else if (dmElapsedMs(nowMs, lastMotionMs_) >=
+             DM_STATIONARY_CONFIRM_MS)
     {
         localMoving_ = false;
     }
 
     localState.moving = localMoving_;
-    if (!localState.isBase)
-        updateFallDetection(nowMs, rawNormG);
+
+    // Same FALL detector on base and tracker, but only after calibration is
+    // valid for this physical node.
+    updateFallDetection(localState, nowMs, rawNormG);
 }
 
 void DistanceMonitorModule::updateLocalPosition(
     DmNodeState &localState,
     uint32_t nowMs)
 {
-    // Reassert every control tick, but only emit the detailed diagnostic once
-    // per minute. This closes the window where another subsystem could disable
-    // the GNSS without DM noticing.
+    // Reassert every control tick. ensureGpsAlwaysOn() also owns the periodic
+    // functional diagnostic through lastGpsFunctionalCheckMs_.
     ensureGpsAlwaysOn(nowMs, false);
 
     if (readNewUsableGpsPosition())
@@ -448,6 +1080,7 @@ void DistanceMonitorModule::triggerLocalSos(DmSosCause cause)
 
     size_t localIndex = 0U;
     size_t baseIndex = 0U;
+
     if (!findLocalIndex(localIndex) ||
         nodeStates_[localIndex].isBase ||
         !findBaseIndex(baseIndex))
@@ -456,6 +1089,7 @@ void DistanceMonitorModule::triggerLocalSos(DmSosCause cause)
     }
 
     const uint32_t nowMs = millis();
+
     if (cause != DmSosCause::ManualButton &&
         lastSosTriggerMs_ != 0U &&
         dmElapsedMs(nowMs, lastSosTriggerMs_) < DM_SOS_REARM_MS)
@@ -464,8 +1098,10 @@ void DistanceMonitorModule::triggerLocalSos(DmSosCause cause)
     }
 
     const uint32_t sequence = allocateSequenceNumber();
+
     pendingSos_.active = true;
-    pendingSos_.targetNode = runtimeConfig_.members[baseIndex].nodeNum;
+    pendingSos_.targetNode =
+        runtimeConfig_.members[baseIndex].nodeNum;
     pendingSos_.sequence = sequence;
     pendingSos_.cause = cause;
     pendingSos_.lastTxMs = nowMs;
