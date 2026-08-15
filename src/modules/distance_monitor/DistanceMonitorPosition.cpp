@@ -1019,14 +1019,16 @@ void DistanceMonitorModule::updateFallDetection(
     const bool postPass =
         post.stdG <= DM_FALL_POST_MAX_STD_G;
 
-    logFallAnalysis(
-        nowMs,
-        pre,
-        impact,
-        post,
-        prePass,
-        impactPass,
-        postPass);
+    if ( impactPass || prePass )
+    //postPass is often true, so avoid to trigg the logg and spamming
+        logFallAnalysis(
+            nowMs,
+            pre,
+            impact,
+            post,
+            prePass,
+            impactPass,
+            postPass);
 
     if (prePass && impactPass && postPass)
         handleLocalFallDetected(localState, nowMs);
