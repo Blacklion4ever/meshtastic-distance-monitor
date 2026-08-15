@@ -1,6 +1,7 @@
 #include "DistanceMonitorModule.h"
 
 #include "DistanceMonitorUtils.h"
+#include "DistanceMonitorVehicle.h"
 #include "NodeDB.h"
 #include "configuration.h"
 
@@ -103,6 +104,15 @@ struct DmImuAutoCalibrationState
 };
 
 static DmImuAutoCalibrationState dmImuAutoCal;
+
+static DmVehicleDetectorState dmVehicleDetector;
+
+static void dmResetVehicleCandidate()
+{
+    dmVehicleDetector.consecutiveHighSpeedSamples = 0U;
+    dmVehicleDetector.lastHighSpeedSampleMs = 0U;
+    dmVehicleDetector.hasLastHighSpeedSampleTime = false;
+}
 
 static DmImuCalibration *dmFindImuCalibration(NodeNum nodeNum)
 {
@@ -709,33 +719,160 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
             static_cast<unsigned long>(localFix_.HDOP));
     }
 
-    if (!localFix_.has_ground_speed)
+    // Vehicle detection is tracker-only. The base still records its GNSS fix,
+    // but driving with the base must never create an IN_VEHICLE state or SOS.
+    size_t localIndex = 0U;
+    if (!findLocalIndex(localIndex))
         return;
+
+    if (nodeStates_[localIndex].isBase)
+    {
+        dmResetVehicleCandidate();
+        highSpeedSosLatched_ = false;
+        highSpeedBelowSinceMs_ = 0U;
+        return;
+    }
+
+    if (!localFix_.has_ground_speed)
+    {
+        dmResetVehicleCandidate();
+        return;
+    }
 
     const float speedKmh =
         static_cast<float>(localFix_.ground_speed) * 3.6F;
 
+    const uint32_t vehicleDop =
+        dmBestDop(localFix_.PDOP, localFix_.HDOP);
+    const double vehicleAccuracyM =
+        dmAccuracyMetersFromDop(vehicleDop);
+    const bool vehicleGpsQualityOk =
+        localFix_.sats_in_view >= DM_VEHICLE_MIN_SATS &&
+        vehicleDop != 0U &&
+        std::isfinite(vehicleAccuracyM) &&
+        vehicleAccuracyM <= DM_VEHICLE_MAX_ACCURACY_M;
+
+    // Never confirm or clear a vehicle state from a poor-quality GNSS sample.
+    // If an above-threshold candidate was being accumulated, break the streak.
+    if (!vehicleGpsQualityOk)
+    {
+        if (speedKmh > DM_HIGH_SPEED_THRESHOLD_KMH)
+        {
+            LOG_DEBUG(
+                "{VEHICLE} reject speed=%.1fkmh sats=%lu dop=%lu acc=%.0fm",
+                static_cast<double>(speedKmh),
+                static_cast<unsigned long>(localFix_.sats_in_view),
+                static_cast<unsigned long>(vehicleDop),
+                vehicleAccuracyM);
+        }
+        dmResetVehicleCandidate();
+        return;
+    }
+
     if (speedKmh > DM_HIGH_SPEED_THRESHOLD_KMH)
     {
         highSpeedBelowSinceMs_ = 0U;
-        if (!highSpeedSosLatched_)
+
+        if (highSpeedSosLatched_)
+            return;
+
+        // A long gap means the previous high-speed sample cannot contribute to
+        // the same confirmation sequence. With 1 Hz GNSS, 2500 ms comfortably
+        // accepts normal scheduling jitter while rejecting stale samples.
+        if (!dmVehicleDetector.hasLastHighSpeedSampleTime ||
+            dmElapsedMs(nowMs, dmVehicleDetector.lastHighSpeedSampleMs) >
+                DM_VEHICLE_CONFIRM_MAX_GAP_MS)
         {
-            highSpeedSosLatched_ = true;
-            triggerLocalSos(DmSosCause::HighSpeedMovement);
+            dmVehicleDetector.consecutiveHighSpeedSamples = 0U;
         }
+
+        dmVehicleDetector.lastHighSpeedSampleMs = nowMs;
+        dmVehicleDetector.hasLastHighSpeedSampleTime = true;
+        if (dmVehicleDetector.consecutiveHighSpeedSamples <
+            DM_VEHICLE_CONFIRM_SAMPLES)
+        {
+            ++dmVehicleDetector.consecutiveHighSpeedSamples;
+        }
+
+        LOG_INFO(
+            "{VEHICLE} candidate speed=%.1fkmh confirm=%u/%u sats=%lu dop=%lu acc=%.0fm",
+            static_cast<double>(speedKmh),
+            static_cast<unsigned>(dmVehicleDetector.consecutiveHighSpeedSamples),
+            static_cast<unsigned>(DM_VEHICLE_CONFIRM_SAMPLES),
+            static_cast<unsigned long>(localFix_.sats_in_view),
+            static_cast<unsigned long>(vehicleDop),
+            vehicleAccuracyM);
+
+        if (dmVehicleDetector.consecutiveHighSpeedSamples <
+            DM_VEHICLE_CONFIRM_SAMPLES)
+        {
+            return;
+        }
+
+        // triggerLocalSos() can legitimately refuse a non-manual SOS during the
+        // global SOS rearm interval. Do not latch IN_VEHICLE until a new SOS was
+        // actually armed; keep the confirmed candidate alive so the next good
+        // 1 Hz fix retries automatically.
+        const uint32_t previousSosSequence = pendingSos_.sequence;
+        triggerLocalSos(DmSosCause::HighSpeedMovement);
+
+        const bool vehicleSosArmed =
+            pendingSos_.active &&
+            pendingSos_.cause == DmSosCause::HighSpeedMovement &&
+            pendingSos_.sequence != previousSosSequence;
+
+        if (!vehicleSosArmed)
+        {
+            LOG_INFO(
+                "{VEHICLE} confirmed speed=%.1fkmh SOS deferred/retry",
+                static_cast<double>(speedKmh));
+            return;
+        }
+
+        highSpeedSosLatched_ = true;
+        dmResetVehicleCandidate();
+        LOG_WARN(
+            "{VEHICLE} CONFIRMED speed=%.1fkmh -> SOS",
+            static_cast<double>(speedKmh));
+        return;
     }
-    else if (highSpeedSosLatched_)
+
+    // Any good-quality sample at or below the entry threshold breaks an
+    // unconfirmed high-speed streak.
+    dmResetVehicleCandidate();
+
+    if (!highSpeedSosLatched_)
     {
-        if (highSpeedBelowSinceMs_ == 0U)
-        {
-            highSpeedBelowSinceMs_ = nowMs;
-        }
-        else if (dmElapsedMs(nowMs, highSpeedBelowSinceMs_) >=
-                 DM_HIGH_SPEED_CLEAR_MS)
-        {
-            highSpeedSosLatched_ = false;
-            highSpeedBelowSinceMs_ = 0U;
-        }
+        highSpeedBelowSinceMs_ = 0U;
+        return;
+    }
+
+    // Hysteresis: once IN_VEHICLE is latched, speeds between 15 and 20 km/h
+    // neither re-arm nor clear it. Clearing requires 10 s continuously below
+    // the lower threshold using good-quality GNSS samples.
+    if (speedKmh > DM_VEHICLE_CLEAR_THRESHOLD_KMH)
+    {
+        highSpeedBelowSinceMs_ = 0U;
+        return;
+    }
+
+    if (highSpeedBelowSinceMs_ == 0U)
+    {
+        highSpeedBelowSinceMs_ = nowMs;
+        LOG_INFO(
+            "{VEHICLE} clear candidate speed=%.1fkmh",
+            static_cast<double>(speedKmh));
+        return;
+    }
+
+    if (dmElapsedMs(nowMs, highSpeedBelowSinceMs_) >=
+        DM_HIGH_SPEED_CLEAR_MS)
+    {
+        highSpeedSosLatched_ = false;
+        highSpeedBelowSinceMs_ = 0U;
+        LOG_INFO(
+            "{VEHICLE} CLEAR speed=%.1fkmh",
+            static_cast<double>(speedKmh));
     }
 #endif
 }
@@ -1019,8 +1156,10 @@ void DistanceMonitorModule::updateFallDetection(
     const bool postPass =
         post.stdG <= DM_FALL_POST_MAX_STD_G;
 
-    if ( impactPass || prePass )
-    //postPass is often true, so avoid to trigg the logg and spamming
+    // POST is naturally true at rest. Only emit detailed FALL statistics when
+    // PRE or IMPACT is interesting, otherwise the stationary state floods logs.
+    if (impactPass || prePass)
+    {
         logFallAnalysis(
             nowMs,
             pre,
@@ -1029,6 +1168,7 @@ void DistanceMonitorModule::updateFallDetection(
             prePass,
             impactPass,
             postPass);
+    }
 
     if (prePass && impactPass && postPass)
         handleLocalFallDetected(localState, nowMs);

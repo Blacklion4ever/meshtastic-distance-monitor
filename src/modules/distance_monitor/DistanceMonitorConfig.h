@@ -17,7 +17,7 @@ static constexpr uint32_t DM_SUMMARY_INTERVAL_MS = 5000U;
 
 // When true, distance/radio/SOS alarm audio is muted. Alarm state, logs, radio
 // traffic, pairing/notification tones and SEARCH feedback remain active.
-static constexpr bool DM_ALARM_AUDIO_SILENT = true;
+static constexpr bool DM_ALARM_AUDIO_SILENT = false;
 
 // Status LED ergonomics.
 static constexpr bool DM_STATUS_LED_ENABLED = true;
