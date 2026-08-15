@@ -65,6 +65,13 @@ static constexpr float DM_IMU_CAL_MIN_AXIS_SPAN = 1.75F;
 static constexpr float DM_IMU_CAL_MAX_AXIS_SPAN = 2.50F;
 static constexpr uint32_t DM_IMU_CAL_PROGRESS_LOG_MS = 1500U;
 
+// FALL PRE trial criteria. The ratio is relative to the PRE phase length, so
+// changing the sampler/window size does not silently change the requirement in
+// absolute sample count.
+static constexpr float DM_FALL_PRE_MIN_G_THRESHOLD_G = 0.70F;
+static constexpr float DM_FALL_PRE_LOW_G_THRESHOLD_G = 0.90F;
+static constexpr float DM_FALL_PRE_MIN_LOW_G_RATIO = 0.25F;
+
 struct DmImuAutoCalibrationState
 {
     NodeNum nodeNum = 0U;
@@ -855,12 +862,35 @@ void DistanceMonitorModule::logFallAnalysis(
     lastFallStatsLogMs_ = nowMs;
     hasFallStatsLogTime_ = true;
 
+    const size_t preStartAge =
+        DM_FALL_POST_SAMPLES + DM_FALL_IMPACT_SAMPLES;
+    float preMinG = std::numeric_limits<float>::infinity();
+    size_t preLowGCount = 0U;
+    for (size_t offset = 0U; offset < DM_FALL_PRE_SAMPLES; ++offset)
+    {
+        const size_t index =
+            fallBufferIndexFromAge(preStartAge + offset);
+        const float magnitudeG = fallMagnitudeBuffer_[index];
+        preMinG = std::min(preMinG, magnitudeG);
+        if (magnitudeG < DM_FALL_PRE_LOW_G_THRESHOLD_G)
+            ++preLowGCount;
+    }
+    const float preLowGRatio =
+        DM_FALL_PRE_SAMPLES > 0U
+            ? static_cast<float>(preLowGCount) /
+                  static_cast<float>(DM_FALL_PRE_SAMPLES)
+            : 0.0F;
+
     LOG_INFO(
-        "{FALL} PRE  [%s] mean=%.2f std=%.2f rms=%.2f",
+        "{FALL} PRE  [%s] mean=%.2f std=%.2f rms=%.2f min=%.2f low=%.0f%% (%u/%u)",
         prePass ? "PASS" : "NO",
         static_cast<double>(pre.meanG),
         static_cast<double>(pre.stdG),
-        static_cast<double>(pre.rmsG));
+        static_cast<double>(pre.rmsG),
+        static_cast<double>(preMinG),
+        static_cast<double>(preLowGRatio * 100.0F),
+        static_cast<unsigned>(preLowGCount),
+        static_cast<unsigned>(DM_FALL_PRE_SAMPLES));
 
     LOG_INFO(
         "{FALL} IMP  [%s] mean=%.2f std=%.2f rms=%.2f",
@@ -958,9 +988,30 @@ void DistanceMonitorModule::updateFallDetection(
         preStartAge,
         DM_FALL_PRE_SAMPLES);
 
-    // One intentionally simple decision statistic per phase.
+    // PRE is intentionally event-based rather than mean-based. A fall must
+    // contain both a clear low-g dip and a sufficient proportion of the PRE
+    // window below the broader low-g threshold. The proportion is expressed as
+    // a ratio of PRE, never as a hard-coded sample count.
+    float preMinG = std::numeric_limits<float>::infinity();
+    size_t preLowGCount = 0U;
+    for (size_t offset = 0U; offset < DM_FALL_PRE_SAMPLES; ++offset)
+    {
+        const size_t index =
+            fallBufferIndexFromAge(preStartAge + offset);
+        const float magnitudeG = fallMagnitudeBuffer_[index];
+        preMinG = std::min(preMinG, magnitudeG);
+        if (magnitudeG < DM_FALL_PRE_LOW_G_THRESHOLD_G)
+            ++preLowGCount;
+    }
+    const float preLowGRatio =
+        DM_FALL_PRE_SAMPLES > 0U
+            ? static_cast<float>(preLowGCount) /
+                  static_cast<float>(DM_FALL_PRE_SAMPLES)
+            : 0.0F;
+
     const bool prePass =
-        pre.meanG <= DM_FALL_PRE_MAX_MEAN_G;
+        preMinG < DM_FALL_PRE_MIN_G_THRESHOLD_G &&
+        preLowGRatio >= DM_FALL_PRE_MIN_LOW_G_RATIO;
 
     const bool impactPass =
         impact.rmsG >= DM_FALL_IMPACT_MIN_RMS_G;
