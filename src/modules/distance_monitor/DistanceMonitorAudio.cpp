@@ -83,7 +83,7 @@ bool DistanceMonitorAudio::setup()
     initialized_ = true;
 
     LOG_INFO(
-        "Distance Monitor audio: buzzer ready gpio=%u config_gpio=%u",
+        "{DM@Audio} state=READY gpio=%u config_gpio=%u",
         static_cast<unsigned>(buzzerPin_),
         static_cast<unsigned>(config.device.buzzer_gpio));
 
@@ -192,7 +192,7 @@ bool DistanceMonitorAudio::startSos()
 {
     if (!initialized_)
     {
-        LOG_ERROR("Distance Monitor audio: cannot start SOS, buzzer unavailable");
+        LOG_ERROR("{DM@Audio} state=ERROR reason=BUZZER_UNAVAILABLE action=START_SOS");
         return false;
     }
 
@@ -203,7 +203,7 @@ bool DistanceMonitorAudio::startSos()
     pattern_ = Pattern::None;
     stepRunning_ = false;
     startTone(DM_BIP_FREQ_START_HZ);
-    LOG_WARN("Distance Monitor audio: SOS tone started");
+    LOG_WARN("{DM@Audio} state=PLAYING reason=SOS");
     return true;
 }
 

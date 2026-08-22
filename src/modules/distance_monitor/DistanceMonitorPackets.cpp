@@ -188,7 +188,7 @@ void DistanceMonitorModule::noteRemoteSession(
             sender.faultSnoozedUntilMs = 0U;
 
             LOG_WARN(
-                "{Alarm} Cause=UNPAIRED id=!%08lx session=%04x->%04x silent=%s",
+                "{DM@Alarm} Cause=UNPAIRED id=!%08lx session=%04x->%04x silent=%s",
                 static_cast<unsigned long>(sender.nodeNum),
                 static_cast<unsigned>(oldSession),
                 static_cast<unsigned>(sessionId),
@@ -210,7 +210,7 @@ void DistanceMonitorModule::clearUnpairedFault(DmNodeState &sender)
     sender.hasFaultAudioTime = false;
 
     LOG_INFO(
-        "{Pair} id=!%08lx restored",
+        "{DM@Pair} id=!%08lx restored",
         static_cast<unsigned long>(sender.nodeNum));
 }
 
@@ -290,7 +290,7 @@ void DistanceMonitorModule::handlePairConfirm(
     if (!samePair)
     {
         LOG_INFO(
-            "{Pair} id=!%08lx paired session=%04x",
+            "{DM@Pair} id=!%08lx paired session=%04x",
             static_cast<unsigned long>(sender.nodeNum),
             static_cast<unsigned>(baseSessionId));
     }
@@ -324,29 +324,34 @@ void DistanceMonitorModule::handlePositionReport(
 
     if (sender.positionKind == DmPositionKind::FreshFix)
     {
-        sender.latitudeI = static_cast<int32_t>(readU32Le(payload, 13U));
-        sender.longitudeI = static_cast<int32_t>(readU32Le(payload, 17U));
-        sender.positionDop = readU16Le(payload, 22U);
-        sender.positionAccuracyMeters =
-            dmAccuracyMetersFromDop(sender.positionDop);
+        const int32_t latitudeI = static_cast<int32_t>(readU32Le(payload, 13U));
+        const int32_t longitudeI = static_cast<int32_t>(readU32Le(payload, 17U));
+        const uint16_t positionDop = readU16Le(payload, 22U);
 
         // A report advertising FIX without coordinates/DOP is malformed for V7.
-        if (sender.latitudeI == 0 ||
-            sender.longitudeI == 0 ||
-            sender.positionDop == 0U)
+        if (latitudeI == 0 || longitudeI == 0 || positionDop == 0U)
         {
             sender.positionKind = DmPositionKind::NoFix;
-            sender.latitudeI = 0;
-            sender.longitudeI = 0;
             sender.positionDop = 0U;
             sender.positionAccuracyMeters =
                 std::numeric_limits<double>::infinity();
         }
+        else
+        {
+            sender.latitudeI = latitudeI;
+            sender.longitudeI = longitudeI;
+            sender.positionDop = positionDop;
+            sender.positionAccuracyMeters =
+                dmAccuracyMetersFromDop(sender.positionDop);
+            sender.lastFixRxMs = nowMs;
+            sender.hasLastFixRxTime = true;
+        }
     }
     else
     {
-        sender.latitudeI = 0;
-        sender.longitudeI = 0;
+        // Keep latitude/longitude as last-known position for UI/recovery use.
+        // positionKind remains authoritative: stale coordinates are never used
+        // for the live GPS distance decision.
         sender.positionDop = 0U;
         sender.positionAccuracyMeters =
             std::numeric_limits<double>::infinity();
@@ -373,7 +378,7 @@ void DistanceMonitorModule::handlePositionReport(
         sender.faultCause != DmFaultCause::Unpaired)
     {
         LOG_INFO(
-            "{RX} link restored id=!%08lx previous=%s",
+            "{DM@RX} link restored id=!%08lx previous=%s",
             static_cast<unsigned long>(sender.nodeNum),
             dmFaultCauseName(sender.faultCause));
         sender.faultCause = DmFaultCause::None;
@@ -404,7 +409,7 @@ void DistanceMonitorModule::handlePositionReport(
         clearUnpairedFault(sender);
         audio_.playPairingBops();
         LOG_INFO(
-            "{Pair} id=!%08lx paired",
+            "{DM@Pair} id=!%08lx paired",
             static_cast<unsigned long>(sender.nodeNum));
     }
 
@@ -427,7 +432,7 @@ void DistanceMonitorModule::handlePositionReport(
         formatCoordinateE7(sender.longitudeI, longitude, sizeof(longitude));
 
         LOG_INFO(
-            "{RX} report from id=!%08lx [pos=FIX Lat=%s Lon=%s dop=%u acc=%.0fm bat=%s state=%s interval=%us RSSI_BT=%s RSSI_TB=%s]",
+            "{DM@RX} report from id=!%08lx [pos=FIX Lat=%s Lon=%s dop=%u acc=%.0fm bat=%s state=%s interval=%us RSSI_BT=%s RSSI_TB=%s]",
             static_cast<unsigned long>(sender.nodeNum),
             latitude,
             longitude,
@@ -442,7 +447,7 @@ void DistanceMonitorModule::handlePositionReport(
     else
     {
         LOG_INFO(
-            "{RX} report from id=!%08lx [pos=NO_FIX bat=%s state=%s interval=%us RSSI_BT=%s RSSI_TB=%s]",
+            "{DM@RX} report from id=!%08lx [pos=NO_FIX bat=%s state=%s interval=%us RSSI_BT=%s RSSI_TB=%s]",
             static_cast<unsigned long>(sender.nodeNum),
             battery,
             sender.moving ? "MOVING" : "STATIONARY",
@@ -474,7 +479,7 @@ void DistanceMonitorModule::handleSetPositionInterval(
     forcePositionReport_ = true;
 
     LOG_INFO(
-        "{RX} setinterval from id=!%08lx (%u s)",
+        "{DM@RX} setinterval from id=!%08lx (%u s)",
         static_cast<unsigned long>(sender.nodeNum),
         static_cast<unsigned>(localAppliedIntervalSec_));
 }
@@ -521,12 +526,12 @@ void DistanceMonitorModule::handleSos(
     triggerStatusLedDoubleBlink();
 
     if (!DM_ALARM_AUDIO_SILENT && !audio_.startSos())
-        LOG_ERROR("{Alarm} Cause=SOS buzzer unavailable");
+        LOG_ERROR("{DM@Alarm} Cause=SOS buzzer unavailable");
 
     sendSosAck(sender.nodeNum, header.sequence, trackerSessionId);
 
     LOG_WARN(
-        "{Alarm} Cause=SOS id=!%08lx source=remote cause=%s seq=%lu silent=%s",
+        "{DM@Alarm} Cause=SOS id=!%08lx source=remote cause=%s seq=%lu silent=%s",
         static_cast<unsigned long>(sender.nodeNum),
         dmSosCauseName(sender.activeSosCause),
         static_cast<unsigned long>(header.sequence),
@@ -551,7 +556,7 @@ void DistanceMonitorModule::handleSosAck(
 
     pendingSos_.active = false;
     LOG_INFO(
-        "{RX} applicative ACK from id=!%08lx [SOS seq=%lu]",
+        "{DM@RX} applicative ACK from id=!%08lx [SOS seq=%lu]",
         static_cast<unsigned long>(mp.from),
         static_cast<unsigned long>(ackedSequence));
 }
@@ -573,7 +578,7 @@ void DistanceMonitorModule::handleNotification(
         // User notification remains audible in silent alarm mode.
         audio_.playTrackerNotification();
         LOG_INFO(
-            "{RX} notification from id=!%08lx [seq=%lu]",
+            "{DM@RX} notification from id=!%08lx [seq=%lu]",
             static_cast<unsigned long>(sender.nodeNum),
             static_cast<unsigned long>(header.sequence));
     }
@@ -601,7 +606,7 @@ void DistanceMonitorModule::handleNotificationAck(
 
     sender.notificationAcked = true;
     LOG_INFO(
-        "{RX} applicative ACK from id=!%08lx [notification seq=%lu]",
+        "{DM@RX} applicative ACK from id=!%08lx [notification seq=%lu]",
         static_cast<unsigned long>(sender.nodeNum),
         static_cast<unsigned long>(ackedSequence));
 }
@@ -623,7 +628,7 @@ void DistanceMonitorModule::handleShutdownNotice(
     sender.pairedRemoteSessionId = 0U;
 
     LOG_WARN(
-        "{RX} shutdown from id=!%08lx",
+        "{DM@RX} shutdown from id=!%08lx",
         static_cast<unsigned long>(sender.nodeNum));
 }
 
@@ -926,38 +931,38 @@ bool DistanceMonitorModule::sendPacket(
     {
     case DmMessageType::SetPositionInterval:
         LOG_INFO(
-            "{TX} to id=!%08lx setinterval (%u s)",
+            "{DM@TX} to id=!%08lx setinterval (%u s)",
             static_cast<unsigned long>(target),
             bodySize >= 3U ? static_cast<unsigned>(body[2U]) : 0U);
         break;
     case DmMessageType::Notification:
         LOG_INFO(
-            "{TX} to id=!%08lx notification",
+            "{DM@TX} to id=!%08lx notification",
             static_cast<unsigned long>(target));
         break;
     case DmMessageType::NotificationAck:
         LOG_INFO(
-            "{TX} to id=!%08lx applicative ACK (notification)",
+            "{DM@TX} to id=!%08lx applicative ACK (notification)",
             static_cast<unsigned long>(target));
         break;
     case DmMessageType::Sos:
         LOG_INFO(
-            "{TX} to id=!%08lx SOS",
+            "{DM@TX} to id=!%08lx SOS",
             static_cast<unsigned long>(target));
         break;
     case DmMessageType::SosAck:
         LOG_INFO(
-            "{TX} to id=!%08lx applicative ACK (SOS)",
+            "{DM@TX} to id=!%08lx applicative ACK (SOS)",
             static_cast<unsigned long>(target));
         break;
     case DmMessageType::ShutdownNotice:
         LOG_INFO(
-            "{TX} to id=!%08lx shutdown",
+            "{DM@TX} to id=!%08lx shutdown",
             static_cast<unsigned long>(target));
         break;
     case DmMessageType::PairConfirm:
         LOG_DEBUG(
-            "{TX} to id=!%08lx pair confirm",
+            "{DM@TX} to id=!%08lx pair confirm",
             static_cast<unsigned long>(target));
         break;
     case DmMessageType::AliveRequest:

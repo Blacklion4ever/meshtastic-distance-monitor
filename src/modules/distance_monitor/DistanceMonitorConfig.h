@@ -8,6 +8,8 @@ static constexpr size_t DM_MAX_MEMBERS = 2U;
 
 // Protocol V7: 16-bit boot session IDs, compact position flags and DOP transfer.
 static constexpr uint8_t DM_PROTOCOL_VERSION = 7U;
+// Text log contract consumed by the passive Android application.
+static constexpr uint8_t DM_LOG_SCHEMA = 1U;
 static constexpr const char *DM_FIRMWARE_VERSION = "1.0.0-beta7-fall-ring";
 
 // Main scheduling cadence.

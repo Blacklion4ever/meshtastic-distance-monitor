@@ -217,16 +217,18 @@ void DistanceMonitorModule::initializeIfNeeded()
     moduleInitialized_ = true;
 
     LOG_INFO(
-        "{Init} firmware=%s protocol=%u session=%04x silent=%s",
+        "{DM@Init} schema=%u firmware=%s protocol=%u session=%04x audio=%s silent=%s",
+        static_cast<unsigned>(DM_LOG_SCHEMA),
         DM_FIRMWARE_VERSION,
         static_cast<unsigned>(DM_PROTOCOL_VERSION),
         static_cast<unsigned>(bootSessionId_),
+        DM_ALARM_AUDIO_SILENT ? "SILENT" : "AUDIBLE",
         DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
 
     // The buzzer is still useful in silent alarm mode for pairing,
     // notifications and SEARCH, so report a missing buzzer in either mode.
     if (!audio_.isAvailable())
-        LOG_ERROR("{Alarm} Cause=BuzzerUnavailable silent=%s",
+        LOG_ERROR("{DM@Alarm} Cause=BuzzerUnavailable silent=%s",
                   DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
 
     setIntervalFromNow(DM_TICK_INTERVAL_MS);
@@ -666,7 +668,7 @@ void DistanceMonitorModule::processLinkState(
         }
 
         LOG_WARN(
-            "{Alarm} Cause=%s id=!%08lx age=%lus silent=%s",
+            "{DM@Alarm} Cause=%s id=!%08lx age=%lus silent=%s",
             dmFaultCauseName(remote.faultCause),
             static_cast<unsigned long>(remote.nodeNum),
             static_cast<unsigned long>(ageMs / 1000U),
@@ -730,7 +732,7 @@ void DistanceMonitorModule::processNotifications(uint32_t nowMs)
         // User-command confirmation remains audible in silent alarm mode.
         audio_.playConfirmationBop();
         LOG_INFO(
-            "{RX} notification ACK complete seq=%lu",
+            "{DM@RX} notification ACK complete seq=%lu",
             static_cast<unsigned long>(pendingSequence));
 
         for (size_t index = 0U;
@@ -766,7 +768,7 @@ void DistanceMonitorModule::processNotifications(uint32_t nowMs)
         return;
 
     LOG_WARN(
-        "{Alarm} Cause=NotificationAckTimeout seq=%lu silent=%s",
+        "{DM@Alarm} Cause=NotificationAckTimeout seq=%lu silent=%s",
         static_cast<unsigned long>(pendingSequence),
         DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
 
@@ -946,7 +948,7 @@ void DistanceMonitorModule::updateDistanceAlertState(
         if (remoteState.distanceSource == DmDistanceSource::Rssi)
         {
             LOG_WARN(
-                "{Alarm} Cause=Distance id=!%08lx source=RSSI band=%s RSSI=%.0fdBm ratio=%u%% silent=%s",
+                "{DM@Alarm} Cause=Distance id=!%08lx source=RSSI band=%s RSSI=%.0fdBm ratio=%u%% silent=%s",
                 static_cast<unsigned long>(remoteState.nodeNum),
                 dmDistanceBandName(remoteState.rssiEstimate.band),
                 static_cast<double>(remoteState.rssiEstimate.bestRssiDbm),
@@ -956,7 +958,7 @@ void DistanceMonitorModule::updateDistanceAlertState(
         else
         {
             LOG_WARN(
-                "{Alarm} Cause=Distance id=!%08lx source=%s dist=%.0fm raw=%.0fm acc=%.0fm ratio=%u%% silent=%s",
+                "{DM@Alarm} Cause=Distance id=!%08lx source=%s dist=%.0fm raw=%.0fm acc=%.0fm ratio=%u%% silent=%s",
                 static_cast<unsigned long>(remoteState.nodeNum),
                 dmDistanceSourceName(remoteState.distanceSource),
                 remoteState.distanceMeters,
@@ -1176,7 +1178,7 @@ bool DistanceMonitorModule::handleSearchToggle()
         searchTargetIndex_ = DM_MAX_MEMBERS;
         hasSearchPulseTime_ = false;
         audio_.playSearchExit();
-        LOG_INFO("{Search} off");
+        LOG_INFO("{DM@Search} off");
         return true;
     }
 
@@ -1196,7 +1198,7 @@ bool DistanceMonitorModule::handleSearchToggle()
 
     if (target == DM_MAX_MEMBERS)
     {
-        LOG_WARN("{Search} no paired tracker");
+        LOG_WARN("{DM@Search} no paired tracker");
         return true;
     }
 
@@ -1206,7 +1208,7 @@ bool DistanceMonitorModule::handleSearchToggle()
     audio_.playSearchEnter();
 
     LOG_INFO(
-        "{Search} on id=!%08lx contact=%.0fm",
+        "{DM@Search} on id=!%08lx contact=%.0fm",
         static_cast<unsigned long>(nodeStates_[target].nodeNum),
         static_cast<double>(DM_SEARCH_CONTACT_DISTANCE_M));
     return true;
@@ -1323,7 +1325,7 @@ bool DistanceMonitorModule::handleSingleButtonPress()
     if (hadSos)
     {
         audio_.stopSos();
-        LOG_INFO("{Alarm} SOS acknowledged");
+        LOG_INFO("{DM@Alarm} SOS acknowledged");
         return true;
     }
 
@@ -1349,7 +1351,7 @@ bool DistanceMonitorModule::handleSingleButtonPress()
 
     if (hadFault)
     {
-        LOG_INFO("{Alarm} fault snoozed");
+        LOG_INFO("{DM@Alarm} fault snoozed");
         return true;
     }
 
@@ -1381,7 +1383,7 @@ bool DistanceMonitorModule::handleSingleButtonPress()
     }
 
     if (hadDistanceAlert)
-        LOG_INFO("{Alarm} Distance acknowledged");
+        LOG_INFO("{DM@Alarm} Distance acknowledged");
 
     return true;
 }
@@ -1446,48 +1448,60 @@ uint32_t DistanceMonitorModule::prepareLocalShutdown()
 
 void DistanceMonitorModule::logSummary(
     size_t localIndex,
-    uint32_t) const
+    uint32_t nowMs) const
 {
     const DmNodeState &local = nodeStates_[localIndex];
     char localBattery[8] = {};
-    dmFormatBattery(
-        local.batteryPercent,
-        localBattery,
-        sizeof(localBattery));
+    dmFormatBattery(local.batteryPercent, localBattery, sizeof(localBattery));
+
+    const bool localHasKnownPosition =
+        local.latitudeI != 0 && local.longitudeI != 0;
+    const double localLat = static_cast<double>(local.latitudeI) * 1.0e-7;
+    const double localLon = static_cast<double>(local.longitudeI) * 1.0e-7;
 
     if (local.positionKind == DmPositionKind::FreshFix)
     {
         LOG_INFO(
-            "{%s} id=!%08lx pos=FIX dop=%u acc=%.0fm bat=%s state=%s",
+            "{DM@%s} schema=%u id=!%08lx pos=FIX lat=%.7f lon=%.7f pos_age_s=%lu dop=%u acc=%.0fm bat=%s motion=%s",
             local.isBase ? "Node_base" : "Node_track",
+            static_cast<unsigned>(DM_LOG_SCHEMA),
             static_cast<unsigned long>(local.nodeNum),
+            localLat,
+            localLon,
+            static_cast<unsigned long>(localFixAgeSeconds(nowMs)),
             static_cast<unsigned>(local.positionDop),
             local.positionAccuracyMeters,
             localBattery,
-            localMotionName(
-                localMoving_,
-                localFallDetected_,
-                highSpeedSosLatched_));
+            localMotionName(localMoving_, localFallDetected_, highSpeedSosLatched_));
+    }
+    else if (localHasKnownPosition)
+    {
+        LOG_INFO(
+            "{DM@%s} schema=%u id=!%08lx pos=NO_FIX last_lat=%.7f last_lon=%.7f last_pos_age_s=%lu bat=%s motion=%s",
+            local.isBase ? "Node_base" : "Node_track",
+            static_cast<unsigned>(DM_LOG_SCHEMA),
+            static_cast<unsigned long>(local.nodeNum),
+            localLat,
+            localLon,
+            static_cast<unsigned long>(dmElapsedMs(nowMs, localFixMs_) / 1000U),
+            localBattery,
+            localMotionName(localMoving_, localFallDetected_, highSpeedSosLatched_));
     }
     else
     {
         LOG_INFO(
-            "{%s} id=!%08lx pos=NO_FIX bat=%s state=%s",
+            "{DM@%s} schema=%u id=!%08lx pos=NO_FIX bat=%s motion=%s",
             local.isBase ? "Node_base" : "Node_track",
+            static_cast<unsigned>(DM_LOG_SCHEMA),
             static_cast<unsigned long>(local.nodeNum),
             localBattery,
-            localMotionName(
-                localMoving_,
-                localFallDetected_,
-                highSpeedSosLatched_));
+            localMotionName(localMoving_, localFallDetected_, highSpeedSosLatched_));
     }
 
     if (!local.isBase)
         return;
 
-    for (size_t index = 0U;
-         index < runtimeConfig_.memberCount;
-         ++index)
+    for (size_t index = 0U; index < runtimeConfig_.memberCount; ++index)
     {
         if (index == localIndex || nodeStates_[index].isBase)
             continue;
@@ -1496,16 +1510,24 @@ void DistanceMonitorModule::logSummary(
         if (!remote.paired)
         {
             LOG_INFO(
-                "{Node_track} id=!%08lx UNPAIRED",
+                "{DM@Node_track} schema=%u id=!%08lx paired=0 link=UNPAIRED pos=NO_FIX dist=Unknown",
+                static_cast<unsigned>(DM_LOG_SCHEMA),
                 static_cast<unsigned long>(remote.nodeNum));
             continue;
         }
 
         char battery[8] = {};
-        dmFormatBattery(
-            remote.batteryPercent,
-            battery,
-            sizeof(battery));
+        dmFormatBattery(remote.batteryPercent, battery, sizeof(battery));
+        const uint32_t reportAgeS = remote.hasPositionReportRxTime
+            ? dmElapsedMs(nowMs, remote.lastPositionReportRxMs) / 1000U
+            : 0U;
+        const uint32_t lastFixAgeS = remote.hasLastFixRxTime
+            ? dmElapsedMs(nowMs, remote.lastFixRxMs) / 1000U
+            : 0U;
+        const bool remoteHasKnownPosition =
+            remote.latitudeI != 0 && remote.longitudeI != 0;
+        const double remoteLat = static_cast<double>(remote.latitudeI) * 1.0e-7;
+        const double remoteLon = static_cast<double>(remote.longitudeI) * 1.0e-7;
 
         if (remote.distanceSource == DmDistanceSource::Gps)
         {
@@ -1513,8 +1535,13 @@ void DistanceMonitorModule::logSummary(
                 std::max(0.0F, remote.distanceRatio) * 100.0F + 0.5F);
 
             LOG_INFO(
-                "{Node_track} id=!%08lx pos=FIX dop=%u acc=%.0fm bat=%s state=%s dist=%.0fm raw=%.0fm total_acc=%.0fm (%u%%)",
+                "{DM@Node_track} schema=%u id=!%08lx paired=1 link=ALIVE rpt_age_s=%lu pos=FIX lat=%.7f lon=%.7f pos_age_s=%lu dop=%u acc=%.0fm bat=%s motion=%s src=GPS dist_m=%.0f raw_m=%.0f total_acc_m=%.0f ratio=%u%% alarm=%u sos=%s fault=%s",
+                static_cast<unsigned>(DM_LOG_SCHEMA),
                 static_cast<unsigned long>(remote.nodeNum),
+                static_cast<unsigned long>(reportAgeS),
+                remoteLat,
+                remoteLon,
+                static_cast<unsigned long>(lastFixAgeS),
                 static_cast<unsigned>(remote.positionDop),
                 remote.positionAccuracyMeters,
                 battery,
@@ -1522,29 +1549,63 @@ void DistanceMonitorModule::logSummary(
                 remote.distanceMeters,
                 remote.rawDistanceMeters,
                 remote.combinedAccuracyMeters,
-                pct);
+                pct,
+                remote.activeDistanceAlertRatio >= DM_DISTANCE_ALERT_START_RATIO ? 1U : 0U,
+                remote.sosActive ? dmSosCauseName(remote.activeSosCause) : "NONE",
+                dmFaultCauseName(remote.faultCause));
         }
         else if (remote.distanceSource == DmDistanceSource::Rssi)
         {
-            LOG_INFO(
-                "{Node_track} id=!%08lx pos=%s dop=%u acc=%s bat=%s state=%s dist=%s RSSI=%.0fdBm",
-                static_cast<unsigned long>(remote.nodeNum),
-                dmPositionKindName(remote.positionKind),
-                static_cast<unsigned>(remote.positionDop),
-                std::isfinite(remote.positionAccuracyMeters) ? "finite" : "INF",
-                battery,
-                remoteMotionName(remote),
-                dmDistanceBandName(remote.rssiEstimate.band),
-                static_cast<double>(remote.rssiEstimate.bestRssiDbm));
+            if (remoteHasKnownPosition)
+            {
+                LOG_INFO(
+                    "{DM@Node_track} schema=%u id=!%08lx paired=1 link=ALIVE rpt_age_s=%lu pos=%s last_lat=%.7f last_lon=%.7f last_pos_age_s=%lu bat=%s motion=%s src=RSSI band=%s rssi=%.0f alarm=%u sos=%s fault=%s",
+                    static_cast<unsigned>(DM_LOG_SCHEMA),
+                    static_cast<unsigned long>(remote.nodeNum),
+                    static_cast<unsigned long>(reportAgeS),
+                    dmPositionKindName(remote.positionKind),
+                    remoteLat,
+                    remoteLon,
+                    static_cast<unsigned long>(lastFixAgeS),
+                    battery,
+                    remoteMotionName(remote),
+                    dmDistanceBandName(remote.rssiEstimate.band),
+                    static_cast<double>(remote.rssiEstimate.bestRssiDbm),
+                    remote.activeDistanceAlertRatio >= DM_DISTANCE_ALERT_START_RATIO ? 1U : 0U,
+                    remote.sosActive ? dmSosCauseName(remote.activeSosCause) : "NONE",
+                    dmFaultCauseName(remote.faultCause));
+            }
+            else
+            {
+                LOG_INFO(
+                    "{DM@Node_track} schema=%u id=!%08lx paired=1 link=ALIVE rpt_age_s=%lu pos=%s bat=%s motion=%s src=RSSI band=%s rssi=%.0f alarm=%u sos=%s fault=%s",
+                    static_cast<unsigned>(DM_LOG_SCHEMA),
+                    static_cast<unsigned long>(remote.nodeNum),
+                    static_cast<unsigned long>(reportAgeS),
+                    dmPositionKindName(remote.positionKind),
+                    battery,
+                    remoteMotionName(remote),
+                    dmDistanceBandName(remote.rssiEstimate.band),
+                    static_cast<double>(remote.rssiEstimate.bestRssiDbm),
+                    remote.activeDistanceAlertRatio >= DM_DISTANCE_ALERT_START_RATIO ? 1U : 0U,
+                    remote.sosActive ? dmSosCauseName(remote.activeSosCause) : "NONE",
+                    dmFaultCauseName(remote.faultCause));
+            }
         }
         else
         {
             LOG_INFO(
-                "{Node_track} id=!%08lx pos=%s bat=%s state=%s dist=Unknown",
+                "{DM@Node_track} schema=%u id=!%08lx paired=1 link=%s rpt_age_s=%lu pos=%s bat=%s motion=%s src=NONE band=Unknown alarm=%u sos=%s fault=%s",
+                static_cast<unsigned>(DM_LOG_SCHEMA),
                 static_cast<unsigned long>(remote.nodeNum),
+                remote.radioState == DmRadioState::Alive ? "ALIVE" : "UNKNOWN",
+                static_cast<unsigned long>(reportAgeS),
                 dmPositionKindName(remote.positionKind),
                 battery,
-                remoteMotionName(remote));
+                remoteMotionName(remote),
+                remote.activeDistanceAlertRatio >= DM_DISTANCE_ALERT_START_RATIO ? 1U : 0U,
+                remote.sosActive ? dmSosCauseName(remote.activeSosCause) : "NONE",
+                dmFaultCauseName(remote.faultCause));
         }
     }
 }

@@ -156,6 +156,8 @@ struct DmNodeState
     uint32_t lastPositionReportSequence = 0U;
     uint32_t lastIntervalEvaluationSequence = 0U;
     bool hasPositionReportRxTime = false;
+    uint32_t lastFixRxMs = 0U;
+    bool hasLastFixRxTime = false;
 
     DmRadioState radioState = DmRadioState::Unknown;
     DmFaultCause faultCause = DmFaultCause::None;

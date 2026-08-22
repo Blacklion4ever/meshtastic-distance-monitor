@@ -199,7 +199,7 @@ static bool dmTryFinishImuAutoCalibration(
         {
             dmImuAutoCal.lastProgressLogMs = nowMs;
             LOG_INFO(
-                "{IMU_CAL} id=!%08lx progress X=%s %.3f Y=%s %.3f Z=%s %.3f",
+                "{DM@IMU_CAL} id=!%08lx progress X=%s %.3f Y=%s %.3f Z=%s %.3f",
                 static_cast<unsigned long>(cal.nodeNum),
                 xReady ? "OK" : "WAIT",
                 static_cast<double>(spanX),
@@ -224,7 +224,7 @@ static bool dmTryFinishImuAutoCalibration(
         !std::isfinite(cal.gainY) || !std::isfinite(cal.gainZ))
     {
         LOG_ERROR(
-            "{IMU_CAL} id=!%08lx invalid result; restarting calibration",
+            "{DM@IMU_CAL} id=!%08lx invalid result; restarting calibration",
             static_cast<unsigned long>(cal.nodeNum));
         dmResetImuAutoCalibration(cal.nodeNum);
         return false;
@@ -234,11 +234,11 @@ static bool dmTryFinishImuAutoCalibration(
     dmImuAutoCal.active = false;
 
     LOG_INFO(
-        "{IMU_CAL} DONE id=!%08lx name=%s",
+        "{DM@IMU_CAL} DONE id=!%08lx name=%s",
         static_cast<unsigned long>(cal.nodeNum),
         cal.name);
     LOG_INFO(
-        "{IMU_CAL} offsetX=%.7f gainX=%.7f offsetY=%.7f gainY=%.7f offsetZ=%.7f gainZ=%.7f",
+        "{DM@IMU_CAL} offsetX=%.7f gainX=%.7f offsetY=%.7f gainY=%.7f offsetZ=%.7f gainZ=%.7f",
         static_cast<double>(cal.offsetX),
         static_cast<double>(cal.gainX),
         static_cast<double>(cal.offsetY),
@@ -246,7 +246,7 @@ static bool dmTryFinishImuAutoCalibration(
         static_cast<double>(cal.offsetZ),
         static_cast<double>(cal.gainZ));
     LOG_INFO(
-        "{IMU_CAL} table: {!%08lx, valid=true, %.7f, %.7f, %.7f, %.7f, %.7f, %.7f}",
+        "{DM@IMU_CAL} table: {!%08lx, valid=true, %.7f, %.7f, %.7f, %.7f, %.7f, %.7f}",
         static_cast<unsigned long>(cal.nodeNum),
         static_cast<double>(cal.offsetX),
         static_cast<double>(cal.gainX),
@@ -272,7 +272,7 @@ static bool dmUpdateImuAutoCalibration(
     {
         dmImuAutoCal.announced = true;
         LOG_WARN(
-            "{IMU_CAL} START id=!%08lx name=%s - place device successively on all 6 faces",
+            "{DM@IMU_CAL} START id=!%08lx name=%s - place device successively on all 6 faces",
             static_cast<unsigned long>(cal.nodeNum),
             cal.name);
     }
@@ -342,7 +342,7 @@ static bool dmUpdateImuAutoCalibration(
     dmAcceptStablePlateau(avgX, avgY, avgZ);
 
     LOG_INFO(
-        "{IMU_CAL} plateau id=!%08lx x=%.3f y=%.3f z=%.3f",
+        "{DM@IMU_CAL} plateau id=!%08lx x=%.3f y=%.3f z=%.3f",
         static_cast<unsigned long>(cal.nodeNum),
         static_cast<double>(avgX),
         static_cast<double>(avgY),
@@ -380,24 +380,24 @@ void DistanceMonitorModule::startLocalPositionManager(uint32_t nowMs)
     lastMotionMs_ = nowMs;
 
 #if MESHTASTIC_EXCLUDE_GPS
-    LOG_WARN("{GPS} unavailable: excluded from firmware");
+    LOG_WARN("{DM@GPS} unavailable: excluded from firmware");
 #else
     if (gps == nullptr)
     {
-        LOG_WARN("{GPS} unavailable");
+        LOG_WARN("{DM@GPS} unavailable");
         return;
     }
 
     if (config.position.fixed_position)
     {
-        LOG_WARN("{GPS} fixed_position enabled");
+        LOG_WARN("{DM@GPS} fixed_position enabled");
         return;
     }
 
     if (config.position.gps_mode ==
         meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT)
     {
-        LOG_WARN("{GPS} marked NOT_PRESENT");
+        LOG_WARN("{DM@GPS} marked NOT_PRESENT");
         return;
     }
 
@@ -418,7 +418,7 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
                 DM_GPS_FUNCTIONAL_CHECK_MS)
         {
             lastGpsFunctionalCheckMs_ = nowMs;
-            LOG_INFO("{GPS} state=OFF flow=NO sats=0 dop=0 acc=INF pdop=0 hdop=0");
+            LOG_INFO("{DM@GPS} state=OFF flow=NO sats=0 dop=0 acc=INF pdop=0 hdop=0");
         }
         return;
     }
@@ -442,11 +442,11 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
             meshtastic_Config_PositionConfig_GpsMode_ENABLED;
         gps->enable();
         changed = true;
-        LOG_WARN("{GPS} state=OFF -> forcing enable");
+        LOG_WARN("{DM@GPS} state=OFF -> forcing enable");
     }
 
     if (changed)
-        LOG_INFO("{GPS} enabled interval=1s");
+        LOG_INFO("{DM@GPS} enabled interval=1s");
 
     const bool diagnosticDue =
         forceDiagnostic ||
@@ -474,7 +474,7 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
     if (std::isfinite(accuracyM))
     {
         LOG_INFO(
-            "{GPS} state=%s flow=%s sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
+            "{DM@GPS} state=%s flow=%s sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
             effectiveStateOn ? "ON" : "OFF",
             flow ? "YES" : "NO",
             static_cast<unsigned long>(sats),
@@ -486,7 +486,7 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
     else
     {
         LOG_INFO(
-            "{GPS} state=%s flow=%s sats=%lu dop=0 acc=INF pdop=%lu hdop=%lu",
+            "{DM@GPS} state=%s flow=%s sats=%lu dop=0 acc=INF pdop=%lu hdop=%lu",
             effectiveStateOn ? "ON" : "OFF",
             flow ? "YES" : "NO",
             static_cast<unsigned long>(sats),
@@ -538,7 +538,7 @@ bool DistanceMonitorModule::readImuSample(
             calibrationLogNode = localNodeNum;
             calibrationLogValid = true;
             LOG_ERROR(
-                "{IMU_CAL} no table entry for id=!%08lx",
+                "{DM@IMU_CAL} no table entry for id=!%08lx",
                 static_cast<unsigned long>(localNodeNum));
         }
         return false;
@@ -567,7 +567,7 @@ bool DistanceMonitorModule::readImuSample(
         calibrationLogNode = localNodeNum;
         calibrationLogValid = true;
         LOG_INFO(
-            "{IMU} calibration id=!%08lx name=%s mode=6face",
+            "{DM@IMU} calibration id=!%08lx name=%s mode=6face",
             static_cast<unsigned long>(localNodeNum),
             cal->name);
     }
@@ -711,7 +711,7 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
         const double accuracyM = dmAccuracyMetersFromDop(dop);
 
         LOG_INFO(
-            "{GPS} fix sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
+            "{DM@GPS} fix sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
             static_cast<unsigned long>(localFix_.sats_in_view),
             static_cast<unsigned long>(dop),
             accuracyM,
@@ -759,7 +759,7 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
         if (speedKmh > DM_HIGH_SPEED_THRESHOLD_KMH)
         {
             LOG_DEBUG(
-                "{VEHICLE} reject speed=%.1fkmh sats=%lu dop=%lu acc=%.0fm",
+                "{DM@VEHICLE} reject speed=%.1fkmh sats=%lu dop=%lu acc=%.0fm",
                 static_cast<double>(speedKmh),
                 static_cast<unsigned long>(localFix_.sats_in_view),
                 static_cast<unsigned long>(vehicleDop),
@@ -795,7 +795,7 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
         }
 
         LOG_INFO(
-            "{VEHICLE} candidate speed=%.1fkmh confirm=%u/%u sats=%lu dop=%lu acc=%.0fm",
+            "{DM@VEHICLE} candidate speed=%.1fkmh confirm=%u/%u sats=%lu dop=%lu acc=%.0fm",
             static_cast<double>(speedKmh),
             static_cast<unsigned>(dmVehicleDetector.consecutiveHighSpeedSamples),
             static_cast<unsigned>(DM_VEHICLE_CONFIRM_SAMPLES),
@@ -824,7 +824,7 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
         if (!vehicleSosArmed)
         {
             LOG_INFO(
-                "{VEHICLE} confirmed speed=%.1fkmh SOS deferred/retry",
+                "{DM@VEHICLE} confirmed speed=%.1fkmh SOS deferred/retry",
                 static_cast<double>(speedKmh));
             return;
         }
@@ -832,7 +832,7 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
         highSpeedSosLatched_ = true;
         dmResetVehicleCandidate();
         LOG_WARN(
-            "{VEHICLE} CONFIRMED speed=%.1fkmh -> SOS",
+            "{DM@VEHICLE} CONFIRMED speed=%.1fkmh -> SOS",
             static_cast<double>(speedKmh));
         return;
     }
@@ -860,7 +860,7 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
     {
         highSpeedBelowSinceMs_ = nowMs;
         LOG_INFO(
-            "{VEHICLE} clear candidate speed=%.1fkmh",
+            "{DM@VEHICLE} clear candidate speed=%.1fkmh",
             static_cast<double>(speedKmh));
         return;
     }
@@ -871,7 +871,7 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
         highSpeedSosLatched_ = false;
         highSpeedBelowSinceMs_ = 0U;
         LOG_INFO(
-            "{VEHICLE} CLEAR speed=%.1fkmh",
+            "{DM@VEHICLE} CLEAR speed=%.1fkmh",
             static_cast<double>(speedKmh));
     }
 #endif
@@ -901,8 +901,9 @@ void DistanceMonitorModule::copyLocalPositionToState(
 
     if (localPositionKind_ == DmPositionKind::NoFix)
     {
-        localState.latitudeI = 0;
-        localState.longitudeI = 0;
+        // Preserve the last-known coordinates for passive display. The
+        // positionKind flag remains NO_FIX, so distance logic cannot treat
+        // these coordinates as a fresh GNSS measurement.
         localState.positionDop = 0U;
         localState.positionAccuracyMeters =
             std::numeric_limits<float>::infinity();
@@ -1019,7 +1020,7 @@ void DistanceMonitorModule::logFallAnalysis(
             : 0.0F;
 
     LOG_INFO(
-        "{FALL} PRE  [%s] mean=%.2f std=%.2f rms=%.2f min=%.2f low=%.0f%% (%u/%u)",
+        "{DM@FALL} PRE  [%s] mean=%.2f std=%.2f rms=%.2f min=%.2f low=%.0f%% (%u/%u)",
         prePass ? "PASS" : "NO",
         static_cast<double>(pre.meanG),
         static_cast<double>(pre.stdG),
@@ -1030,14 +1031,14 @@ void DistanceMonitorModule::logFallAnalysis(
         static_cast<unsigned>(DM_FALL_PRE_SAMPLES));
 
     LOG_INFO(
-        "{FALL} IMP  [%s] mean=%.2f std=%.2f rms=%.2f",
+        "{DM@FALL} IMP  [%s] mean=%.2f std=%.2f rms=%.2f",
         impactPass ? "PASS" : "NO",
         static_cast<double>(impact.meanG),
         static_cast<double>(impact.stdG),
         static_cast<double>(impact.rmsG));
 
     LOG_INFO(
-        "{FALL} POST [%s] mean=%.2f std=%.2f rms=%.2f",
+        "{DM@FALL} POST [%s] mean=%.2f std=%.2f rms=%.2f",
         postPass ? "PASS" : "NO",
         static_cast<double>(post.meanG),
         static_cast<double>(post.stdG),
@@ -1055,14 +1056,14 @@ void DistanceMonitorModule::handleLocalFallDetected(
     localFallDetectedMs_ = nowMs;
 
     LOG_WARN(
-        "{FALL} DETECTED role=%s silent=%s",
+        "{DM@FALL} DETECTED role=%s silent=%s",
         localState.isBase ? "BASE" : "TRACKER",
         DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
 
     if (localState.isBase)
     {
         if (!DM_ALARM_AUDIO_SILENT && !audio_.startSos())
-            LOG_ERROR("{Alarm} Cause=FALL buzzer unavailable");
+            LOG_ERROR("{DM@Alarm} Cause=FALL buzzer unavailable");
         return;
     }
 
@@ -1199,7 +1200,7 @@ void DistanceMonitorModule::sampleLocalImu(
         if (!calibrating)
         {
             if (imuAvailable_ || !imuWarningLogged_)
-                LOG_WARN("{IMU} unavailable");
+                LOG_WARN("{DM@IMU} unavailable");
             imuWarningLogged_ = true;
         }
         else
@@ -1222,7 +1223,7 @@ void DistanceMonitorModule::sampleLocalImu(
     }
 
     if (!imuAvailable_)
-        LOG_INFO("{IMU} ready calibration=node-table");
+        LOG_INFO("{DM@IMU} ready calibration=node-table");
 
     imuAvailable_ = true;
     imuWarningLogged_ = false;
@@ -1260,7 +1261,7 @@ void DistanceMonitorModule::updateLocalPosition(
         localFixAgeSeconds(nowMs) >= freshFixMaxAgeSeconds())
     {
         localPositionKind_ = DmPositionKind::NoFix;
-        LOG_INFO("{GPS} no fix");
+        LOG_INFO("{DM@GPS} no fix");
     }
 
     copyLocalPositionToState(localState, nowMs);
@@ -1301,7 +1302,7 @@ void DistanceMonitorModule::triggerLocalSos(DmSosCause cause)
     lastSosTriggerMs_ = nowMs;
 
     LOG_WARN(
-        "{Alarm} Cause=%s silent=%s",
+        "{DM@Alarm} Cause=%s silent=%s",
         dmSosCauseName(cause),
         DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
 
