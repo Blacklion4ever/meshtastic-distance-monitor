@@ -92,8 +92,9 @@ int SystemCommandsModule::handleInputEvent(const InputEvent *event)
             return true;
         }
         break;
-    case INPUT_BROKER_DISTANCE_SEARCH_TOGGLE:
-        if (distanceMonitorModule && distanceMonitorModule->handleSearchToggle()) {
+    case INPUT_BROKER_DISTANCE_SHUTDOWN_READY:
+        if (distanceMonitorModule) {
+            distanceMonitorModule->handleShutdownThresholdReached();
             return true;
         }
         break;

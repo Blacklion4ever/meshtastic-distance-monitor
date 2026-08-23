@@ -4,11 +4,11 @@
 
 // Vehicle / high-speed movement detector tuning.
 //
-// The GNSS runs at 1 Hz in Distance Monitor. High-speed movement therefore
+// The GNSS runs at 0.5 Hz in Distance Monitor. High-speed movement therefore
 // requires several consecutive, good-quality fixes instead of reacting to a
 // single ground-speed sample.
 static constexpr uint8_t DM_VEHICLE_CONFIRM_SAMPLES = 3U;
-static constexpr uint32_t DM_VEHICLE_CONFIRM_MAX_GAP_MS = 2500U;
+static constexpr uint32_t DM_VEHICLE_CONFIRM_MAX_GAP_MS = 5000U;
 
 // Keep the generic GPS fix acceptance unchanged. These limits are only an
 // additional quality gate for the vehicle alarm.

@@ -14,7 +14,7 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     void setup() override;
     bool handleSingleButtonPress();
     bool handleDoubleButtonPress();
-    bool handleSearchToggle();
+    void handleShutdownThresholdReached();
     bool isLocalBase() const;
     uint32_t prepareLocalShutdown();
 
@@ -69,7 +69,7 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     bool highSpeedSosLatched_ = false;
     uint32_t highSpeedBelowSinceMs_ = 0U;
 
-    // One IMU magnitude ring is shared by base and tracker fall detection.
+    // One IMU magnitude ring is used by tracker fall detection.
     // fallBufferHead_ always points to the newest physical sample; logical
     // phase offsets are expressed as sample ages from that dynamic head.
     float fallMagnitudeBuffer_[DM_MAX_ROLL_BUFFER] = {};
@@ -84,14 +84,16 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     uint32_t localFixMs_ = 0U;
     uint32_t lastGpsSolutionId_ = 0U;
     uint32_t lastGpsFunctionalCheckMs_ = 0U;
+    uint32_t lastGpsAcceptedMs_ = 0U;
+    bool hasGpsAcceptedTime_ = false;
+    uint32_t lastGpsObservedSolutionId_ = 0U;
+    uint32_t lastGpsProgressMs_ = 0U;
+    bool hasGpsProgressTime_ = false;
+    uint32_t lastGpsRecoveryMs_ = 0U;
+    bool hasGpsRecoveryTime_ = false;
     meshtastic_Position localFix_ = {};
     DmPositionKind localPositionKind_ = DmPositionKind::NoFix;
     uint8_t localAppliedIntervalSec_ = DM_MIN_REPORT_INTERVAL_S;
-
-    bool searchModeActive_ = false;
-    size_t searchTargetIndex_ = DM_MAX_MEMBERS;
-    uint32_t lastSearchPulseMs_ = 0U;
-    bool hasSearchPulseTime_ = false;
 
     void loadDefaultConfiguration();
     void initializeIfNeeded();
@@ -110,7 +112,6 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     void processPendingSos(uint32_t nowMs);
     void processNotifications(uint32_t nowMs);
     void updateBaseAudio(size_t localIndex, uint32_t nowMs);
-    void processSearchMode(size_t localIndex, uint32_t nowMs);
 
     // Evaluate GPS first. It returns false when either fix is absent or when
     // combined DOP-derived accuracy is too large; caller then uses RSSI LUT.
@@ -128,7 +129,7 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     DmFaultCause diagnoseRadioLoss(size_t remoteIndex) const;
     bool isRadioFault(DmFaultCause cause) const;
     bool isFaultAudible(const DmNodeState &state, uint32_t nowMs) const;
-    uint32_t linkTimeoutMs() const;
+    uint32_t linkTimeoutMs(uint8_t intervalSec = 0U) const;
     uint32_t rssiBeaconMaxAgeMs() const;
     void logSummary(size_t localIndex, uint32_t nowMs) const;
 
@@ -137,7 +138,7 @@ class DistanceMonitorModule : public SinglePortModule, private concurrency::OSTh
     void triggerStatusLedDoubleBlink();
     void setStatusLed(bool on);
 
-    // GNSS stays enabled at 1 Hz. DOP is not a hard fix rejection anymore:
+    // GNSS stays enabled at 0.5 Hz. DOP is not a hard fix rejection anymore:
     // accuracy is carried to the distance layer which decides GPS vs RSSI.
     void startLocalPositionManager(uint32_t nowMs);
     void ensureGpsAlwaysOn(uint32_t nowMs, bool forceDiagnostic = false);

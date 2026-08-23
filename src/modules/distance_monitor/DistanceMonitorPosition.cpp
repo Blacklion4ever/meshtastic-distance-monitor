@@ -418,25 +418,21 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
                 DM_GPS_FUNCTIONAL_CHECK_MS)
         {
             lastGpsFunctionalCheckMs_ = nowMs;
-            LOG_INFO("{DM@GPS} state=OFF flow=NO sats=0 dop=0 acc=INF pdop=0 hdop=0");
+            LOG_INFO("{DM@GPS} state=OFF flow=NO lock=NO sats=0 dop=0 acc=INF pdop=0 hdop=0");
         }
         return;
     }
 
     bool changed = false;
 
-    if (config.position.gps_update_interval != 1U)
+    if (config.position.gps_update_interval != DM_GPS_UPDATE_INTERVAL_S)
     {
-        config.position.gps_update_interval = 1U;
+        config.position.gps_update_interval = DM_GPS_UPDATE_INTERVAL_S;
         changed = true;
     }
 
-    const bool stateOn =
-        config.position.gps_mode ==
-            meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
-        !gps->isPowerSaving();
-
-    if (!stateOn)
+    if (config.position.gps_mode !=
+        meshtastic_Config_PositionConfig_GpsMode_ENABLED)
     {
         config.position.gps_mode =
             meshtastic_Config_PositionConfig_GpsMode_ENABLED;
@@ -446,7 +442,40 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
     }
 
     if (changed)
-        LOG_INFO("{DM@GPS} enabled interval=1s");
+        LOG_INFO("{DM@GPS} enabled interval=%lus",
+                 static_cast<unsigned long>(DM_GPS_UPDATE_INTERVAL_S));
+
+    const bool flow = gps->hasFlow();
+    const bool lock = gps->hasLock();
+    const uint32_t solutionId = currentGpsSolutionId();
+
+    if (!hasGpsProgressTime_)
+    {
+        lastGpsProgressMs_ = nowMs;
+        hasGpsProgressTime_ = true;
+    }
+
+    if (solutionId != 0U && solutionId != lastGpsObservedSolutionId_)
+    {
+        lastGpsObservedSolutionId_ = solutionId;
+        lastGpsProgressMs_ = nowMs;
+    }
+
+    const bool stalled =
+        !flow ||
+        dmElapsedMs(nowMs, lastGpsProgressMs_) >=
+            DM_GPS_NO_FLOW_RECOVERY_MS;
+
+    if (stalled &&
+        (!hasGpsRecoveryTime_ ||
+         dmElapsedMs(nowMs, lastGpsRecoveryMs_) >=
+             DM_GPS_NO_FLOW_RECOVERY_MS))
+    {
+        lastGpsRecoveryMs_ = nowMs;
+        hasGpsRecoveryTime_ = true;
+        gps->up();
+        LOG_WARN("{DM@GPS} stalled -> forcing wake");
+    }
 
     const bool diagnosticDue =
         forceDiagnostic ||
@@ -464,19 +493,13 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
     const uint32_t hdop = localPosition.HDOP;
     const uint32_t dop = dmBestDop(pdop, hdop);
     const double accuracyM = dmAccuracyMetersFromDop(dop);
-    const bool flow = sats != 0U || pdop != 0U || hdop != 0U;
-
-    const bool effectiveStateOn =
-        config.position.gps_mode ==
-            meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
-        !gps->isPowerSaving();
 
     if (std::isfinite(accuracyM))
     {
         LOG_INFO(
-            "{DM@GPS} state=%s flow=%s sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
-            effectiveStateOn ? "ON" : "OFF",
+            "{DM@GPS} state=ON flow=%s lock=%s sats=%lu dop=%lu acc=%.0fm pdop=%lu hdop=%lu",
             flow ? "YES" : "NO",
+            lock ? "YES" : "NO",
             static_cast<unsigned long>(sats),
             static_cast<unsigned long>(dop),
             accuracyM,
@@ -486,9 +509,9 @@ void DistanceMonitorModule::ensureGpsAlwaysOn(
     else
     {
         LOG_INFO(
-            "{DM@GPS} state=%s flow=%s sats=%lu dop=0 acc=INF pdop=%lu hdop=%lu",
-            effectiveStateOn ? "ON" : "OFF",
+            "{DM@GPS} state=ON flow=%s lock=%s sats=%lu dop=0 acc=INF pdop=%lu hdop=%lu",
             flow ? "YES" : "NO",
+            lock ? "YES" : "NO",
             static_cast<unsigned long>(sats),
             static_cast<unsigned long>(pdop),
             static_cast<unsigned long>(hdop));
@@ -684,7 +707,16 @@ bool DistanceMonitorModule::readNewUsableGpsPosition()
     if (solutionId == 0U || solutionId == lastGpsSolutionId_)
         return false;
 
+    const uint32_t nowMs = millis();
+    if (hasGpsAcceptedTime_ &&
+        dmElapsedMs(nowMs, lastGpsAcceptedMs_) < DM_GPS_SAMPLE_INTERVAL_MS)
+    {
+        return false;
+    }
+
     lastGpsSolutionId_ = solutionId;
+    lastGpsAcceptedMs_ = nowMs;
+    hasGpsAcceptedTime_ = true;
     return true;
 #endif
 }
@@ -777,7 +809,7 @@ void DistanceMonitorModule::captureGpsFix(uint32_t nowMs)
             return;
 
         // A long gap means the previous high-speed sample cannot contribute to
-        // the same confirmation sequence. With 1 Hz GNSS, 2500 ms comfortably
+        // the same confirmation sequence. With 0.5 Hz GNSS, 5000 ms comfortably
         // accepts normal scheduling jitter while rejecting stale samples.
         if (!dmVehicleDetector.hasLastHighSpeedSampleTime ||
             dmElapsedMs(nowMs, dmVehicleDetector.lastHighSpeedSampleMs) >
@@ -887,7 +919,7 @@ uint32_t DistanceMonitorModule::localFixAgeSeconds(uint32_t nowMs) const
 
 uint32_t DistanceMonitorModule::freshFixMaxAgeSeconds() const
 {
-    return 1U + DM_FRESH_FIX_EXTRA_GRACE_S;
+    return DM_GPS_UPDATE_INTERVAL_S + DM_FRESH_FIX_EXTRA_GRACE_S;
 }
 
 void DistanceMonitorModule::copyLocalPositionToState(
@@ -1075,6 +1107,9 @@ void DistanceMonitorModule::updateFallDetection(
     uint32_t nowMs,
     float rawNormG)
 {
+    if (localState.isBase)
+        return;
+
     if (localFallDetected_ &&
         !localState.isBase &&
         dmElapsedMs(nowMs, localFallDetectedMs_) >=
@@ -1241,17 +1276,24 @@ void DistanceMonitorModule::sampleLocalImu(
 
     localState.moving = localMoving_;
 
-    // Same FALL detector on base and tracker, but only after calibration is
-    // valid for this physical node.
-    updateFallDetection(localState, nowMs, rawNormG);
+    if (!localState.isBase)
+    {
+        updateFallDetection(localState, nowMs, rawNormG);
+    }
+    else
+    {
+        localFallDetected_ = false;
+        fallBufferCount_ = 0U;
+        fallBufferHead_ = 0U;
+        lastFallPassMask_ = 0U;
+        hasFallStatsLogTime_ = false;
+    }
 }
 
 void DistanceMonitorModule::updateLocalPosition(
     DmNodeState &localState,
     uint32_t nowMs)
 {
-    // Reassert every control tick. ensureGpsAlwaysOn() also owns the periodic
-    // functional diagnostic through lastGpsFunctionalCheckMs_.
     ensureGpsAlwaysOn(nowMs, false);
 
     if (readNewUsableGpsPosition())

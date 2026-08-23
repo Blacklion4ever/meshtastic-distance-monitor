@@ -52,7 +52,7 @@ bool dmSelectBestRssi(
 {
     if (btValid && tbValid)
     {
-        bestRssiDbm = rssiBtDbm > rssiTbDbm ? rssiBtDbm : rssiTbDbm;
+        bestRssiDbm = 0.5F * (rssiBtDbm + rssiTbDbm);
         return true;
     }
 

@@ -973,7 +973,7 @@ bool DistanceMonitorModule::sendPacket(
         break;
     }
 
-    service->sendToMesh(packet, RX_SRC_LOCAL, true);
+    service->sendToMesh(packet, RX_SRC_LOCAL, false);
     return true;
 }
 

@@ -18,7 +18,7 @@ static constexpr uint32_t DM_CONTROL_INTERVAL_MS = 1000U;
 static constexpr uint32_t DM_SUMMARY_INTERVAL_MS = 5000U;
 
 // When true, distance/radio/SOS alarm audio is muted. Alarm state, logs, radio
-// traffic, pairing/notification tones and SEARCH feedback remain active.
+// traffic and pairing/notification tones remain active.
 static constexpr bool DM_ALARM_AUDIO_SILENT = false;
 
 // Status LED ergonomics.
@@ -48,7 +48,7 @@ static constexpr uint8_t DM_MAX_REPORT_INTERVAL_CAP_S = 20U;
 // Pairing / radio timings.
 static constexpr uint32_t DM_BASE_BEACON_INTERVAL_MS = 10U * 1000U;
 static constexpr uint32_t DM_LINK_TIMEOUT_MARGIN_MS = 5U * 1000U;
-static constexpr uint32_t DM_COM_SATURATION_SILENT_MS = 0U;
+static constexpr uint32_t DM_COM_SATURATION_SILENT_MS = 2U * 60U * 1000U;
 static constexpr uint32_t DM_PAIR_CONFIRM_DELAY_MS = 15U * 1000U;
 static constexpr uint32_t DM_HANDSHAKE_RETRY_MS = 20U * 1000U;
 static constexpr uint32_t DM_PAIR_REASSERT_INTERVAL_MS = 30U * 1000U;
@@ -60,6 +60,7 @@ static constexpr uint32_t DM_FAULT_AUDIO_PERIOD_MS = 30U * 1000U;
 static constexpr uint32_t DM_RESEND_TIMEOUT_MS = 5U * 1000U;
 static constexpr uint32_t DM_NOTIFICATION_ACK_WINDOW_MS = 10U * 1000U;
 static constexpr uint32_t DM_SHUTDOWN_TX_GRACE_MS = 500U;
+static constexpr uint32_t DM_SHUTDOWN_LONG_PRESS_MS = 3000U;
 
 // Motion / SOS configuration.
 static constexpr uint32_t DM_STATIONARY_CONFIRM_MS = 10U * 1000U;
@@ -117,6 +118,9 @@ static_assert(
 // GNSS is kept running continuously by DM. Native Meshtastic broadcasts stay
 // practically disabled because DM owns its own compact position protocol.
 static constexpr uint32_t DM_NATIVE_POSITION_BROADCAST_INTERVAL_S = 24U * 60U * 60U;
+static constexpr uint32_t DM_GPS_UPDATE_INTERVAL_S = 2U;
+static constexpr uint32_t DM_GPS_SAMPLE_INTERVAL_MS = 2000U;
+static constexpr uint32_t DM_GPS_NO_FLOW_RECOVERY_MS = 5000U;
 static constexpr uint32_t DM_FRESH_FIX_EXTRA_GRACE_S = 3U;
 static constexpr uint32_t DM_GPS_FUNCTIONAL_CHECK_MS = 60U * 1000U;
 
@@ -126,8 +130,8 @@ static constexpr float DM_RSSI_FILTER_ALPHA = 0.25F;
 static constexpr float DM_RSSI_TREND_ALPHA = 0.25F;
 static constexpr uint32_t DM_RSSI_VALID_BEACON_MULTIPLIER = 3U;
 
-// Manual indoor RSSI proximity LUT. RSSI is negative: the largest value is the
-// best path. Operational bands are Near, Medium, Warning and VeryFar.
+// Manual indoor RSSI proximity LUT. Operational bands are Near, Medium,
+// Warning and VeryFar.
 static constexpr float DM_RSSI_NEAR_THRESHOLD_DBM = -50.0F;
 static constexpr float DM_RSSI_MEDIUM_THRESHOLD_DBM = -80.0F;
 static constexpr float DM_RSSI_WARNING_THRESHOLD_DBM = -100.0F;
@@ -135,22 +139,6 @@ static constexpr float DM_RSSI_WARNING_THRESHOLD_DBM = -100.0F;
 // that RSSI is a metric distance.
 static constexpr float DM_RSSI_WARNING_ALERT_RATIO = 0.80F;
 static constexpr float DM_RSSI_VERY_FAR_ALERT_RATIO = 1.10F;
-
-// SEARCH stays GNSS-only. At <=15 m it immediately reaches maximum proximity.
-static constexpr uint32_t DM_SEARCH_LONG_PRESS_MS = 2000U;
-static constexpr uint32_t DM_SEARCH_LONG_LONG_PRESS_MS = 5000U;
-static constexpr uint32_t DM_SEARCH_PULSE_INTERVAL_MS = 750U;
-static constexpr uint32_t DM_SEARCH_CONTACT_PULSE_INTERVAL_MS = 500U;
-static constexpr float DM_SEARCH_DETECTION_MAX_RATIO = 0.80F;
-static constexpr float DM_SEARCH_CONTACT_DISTANCE_M = 15.0F;
-static constexpr uint16_t DM_SEARCH_DETECTION_MIN_HZ = 1450U;
-static constexpr uint16_t DM_SEARCH_DETECTION_NEAR_HZ = 2600U;
-static constexpr uint16_t DM_SEARCH_DETECTION_CONTACT_HZ = 3100U;
-static constexpr uint16_t DM_SEARCH_DETECTION_DURATION_MIN_MS = 25U;
-static constexpr uint16_t DM_SEARCH_DETECTION_DURATION_MAX_MS = 90U;
-static constexpr uint16_t DM_SEARCH_DETECTION_CONTACT_DURATION_MS = 180U;
-static constexpr uint16_t DM_SEARCH_DETECTION_DELAY_FAR_MS = 180U;
-static constexpr uint16_t DM_SEARCH_DETECTION_DELAY_NEAR_MS = 150U;
 
 // Radio loss diagnosis thresholds.
 static constexpr uint8_t DM_LOW_BATTERY_PERCENT = 10U;

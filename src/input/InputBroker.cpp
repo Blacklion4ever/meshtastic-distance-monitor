@@ -358,13 +358,12 @@ void InputBroker::Init()
         userConfigNoScreen.doublePress = INPUT_BROKER_SEND_PING;
         userConfigNoScreen.triplePress = INPUT_BROKER_GPS_TOGGLE;
 
-        if (distanceMonitorModule && distanceMonitorModule->isLocalBase()) {
-            userConfigNoScreen.longPress = INPUT_BROKER_DISTANCE_SEARCH_TOGGLE;
-            userConfigNoScreen.longPressTime = DM_SEARCH_LONG_PRESS_MS;
+        if (distanceMonitorModule) {
+            userConfigNoScreen.longPress = INPUT_BROKER_DISTANCE_SHUTDOWN_READY;
+            userConfigNoScreen.longPressTime = DM_SHUTDOWN_LONG_PRESS_MS;
             userConfigNoScreen.longLongPress = INPUT_BROKER_SHUTDOWN;
-            userConfigNoScreen.longLongPressTime = DM_SEARCH_LONG_LONG_PRESS_MS;
+            userConfigNoScreen.longLongPressTime = DM_SHUTDOWN_LONG_PRESS_MS;
             userConfigNoScreen.suppressLeadUpSound = true;
-            userConfigNoScreen.deferLongPressUntilRelease = true;
         }
         UserButtonThread->initButton(userConfigNoScreen);
     }

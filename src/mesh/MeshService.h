@@ -77,6 +77,7 @@ class MeshService
 
     /// Updated in loop() to detect when fromNum changes
     uint32_t oldFromNum = 0;
+    uint32_t suppressedPhonePortNum_ = 0U;
 
   public:
     enum APIState {
@@ -165,6 +166,18 @@ class MeshService
     /// sending. This is the ONLY function you should use for sending messages into the mesh, because it also updates the nodedb
     /// cache
     void sendToMesh(meshtastic_MeshPacket *p, RxSource src = RX_SRC_LOCAL, bool ccToPhone = false);
+
+    void setPhoneForwardingSuppressedPort(uint32_t port)
+    {
+        suppressedPhonePortNum_ = port;
+    }
+
+    bool isPhoneForwardingSuppressed(const meshtastic_MeshPacket &p) const
+    {
+        return suppressedPhonePortNum_ != 0U &&
+               p.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+               static_cast<uint32_t>(p.decoded.portnum) == suppressedPhonePortNum_;
+    }
 
     /** Attempt to cancel a previously sent packet from this _local_ node.  Returns true if a packet was found we could cancel */
     bool cancelSending(PacketId id);

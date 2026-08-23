@@ -84,7 +84,9 @@ void MeshService::init()
 
 int MeshService::handleFromRadio(const meshtastic_MeshPacket *mp)
 {
-    powerFSM.trigger(EVENT_PACKET_FOR_PHONE); // Possibly keep the node from sleeping
+    const bool suppressPhoneForwarding = isPhoneForwardingSuppressed(*mp);
+    if (!suppressPhoneForwarding)
+        powerFSM.trigger(EVENT_PACKET_FOR_PHONE); // Possibly keep the node from sleeping
 
     nodeDB->updateFrom(*mp); // update our DB state based off sniffing every RX packet from the radio
     bool isPreferredRebroadcaster =
@@ -109,8 +111,10 @@ int MeshService::handleFromRadio(const meshtastic_MeshPacket *mp)
         }
     }
 
-    printPacket("Forwarding to phone", mp);
-    sendToPhone(packetPool.allocCopy(*mp));
+    if (!suppressPhoneForwarding) {
+        printPacket("Forwarding to phone", mp);
+        sendToPhone(packetPool.allocCopy(*mp));
+    }
 
     return 0;
 }
@@ -247,6 +251,7 @@ ErrorCode MeshService::sendQueueStatusToPhone(const meshtastic_QueueStatus &qs, 
 void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPhone)
 {
     uint32_t mesh_packet_id = p->id;
+    const bool suppressPhoneForwarding = isPhoneForwardingSuppressed(*p);
     nodeDB->updateFrom(*p); // update our local DB for this packet (because phone might have sent position packets etc...)
 
     // Note: We might return !OK if our fifo was full, at that point the only option we have is to drop it
@@ -254,13 +259,16 @@ void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPh
 
     /* NOTE(pboldin): Prepare and send QueueStatus message to the phone as a
      * high-priority message. */
-    meshtastic_QueueStatus qs = router->getQueueStatus();
-    ErrorCode r = sendQueueStatusToPhone(qs, res, mesh_packet_id);
-    if (r != ERRNO_OK) {
-        LOG_DEBUG("Can't send status to phone");
+    if (!suppressPhoneForwarding) {
+        meshtastic_QueueStatus qs = router->getQueueStatus();
+        ErrorCode r = sendQueueStatusToPhone(qs, res, mesh_packet_id);
+        if (r != ERRNO_OK) {
+            LOG_DEBUG("Can't send status to phone");
+        }
     }
 
-    if ((res == ERRNO_OK || res == ERRNO_SHOULD_RELEASE) && ccToPhone) { // Check if p is not released in case it couldn't be sent
+    if ((res == ERRNO_OK || res == ERRNO_SHOULD_RELEASE) && ccToPhone &&
+        !suppressPhoneForwarding) { // Check if p is not released in case it couldn't be sent
         DEBUG_HEAP_BEFORE;
         auto a = packetPool.allocCopy(*p);
         DEBUG_HEAP_AFTER("MeshService::sendToMesh", a);

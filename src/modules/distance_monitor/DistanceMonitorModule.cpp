@@ -1,6 +1,7 @@
 #include "DistanceMonitorModule.h"
 
 #include "DistanceMonitorUtils.h"
+#include "MeshService.h"
 #include "NodeDB.h"
 #include "PowerStatus.h"
 #include "configuration.h"
@@ -58,6 +59,8 @@ DistanceMonitorModule::DistanceMonitorModule()
 void DistanceMonitorModule::setup()
 {
     initializeIfNeeded();
+    if (service != nullptr)
+        service->setPhoneForwardingSuppressedPort(meshtastic_PortNum_PRIVATE_APP);
 }
 
 void DistanceMonitorModule::setupStatusLed()
@@ -225,8 +228,8 @@ void DistanceMonitorModule::initializeIfNeeded()
         DM_ALARM_AUDIO_SILENT ? "SILENT" : "AUDIBLE",
         DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
 
-    // The buzzer is still useful in silent alarm mode for pairing,
-    // notifications and SEARCH, so report a missing buzzer in either mode.
+    // The buzzer is still useful in silent alarm mode for pairing and
+    // notifications, so report a missing buzzer in either mode.
     if (!audio_.isAvailable())
         LOG_ERROR("{DM@Alarm} Cause=BuzzerUnavailable silent=%s",
                   DM_ALARM_AUDIO_SILENT ? "YES" : "NO");
@@ -254,11 +257,6 @@ int32_t DistanceMonitorModule::runOnce()
         startLocalPositionManager(nowMs);
 
     sampleLocalImu(localState, nowMs);
-
-    // SEARCH has a faster cadence than the one-second control loop, so service
-    // it on every module tick. It still uses GNSS distance only.
-    if (localState.isBase)
-        processSearchMode(localIndex, nowMs);
 
     if (hasControlTickTime_ &&
         dmElapsedMs(nowMs, lastControlTickMs_) < DM_CONTROL_INTERVAL_MS)
@@ -633,7 +631,7 @@ void DistanceMonitorModule::processLinkState(
 
     const uint32_t ageMs =
         dmElapsedMs(nowMs, remote.lastPositionReportRxMs);
-    const uint32_t timeoutMs = linkTimeoutMs();
+    const uint32_t timeoutMs = linkTimeoutMs(remote.appliedIntervalSec);
     const uint32_t suspectMs =
         timeoutMs > DM_LINK_TIMEOUT_MARGIN_MS
             ? timeoutMs - DM_LINK_TIMEOUT_MARGIN_MS
@@ -840,6 +838,9 @@ bool DistanceMonitorModule::evaluateGpsDistance(
         remoteLatitude,
         remoteLongitude);
 
+    if (combinedAccuracyM >= rawDistanceM)
+        return false;
+
     // Safety best case: use the minimum plausible separation so GNSS error
     // cannot create an unnecessary distance alarm. If uncertainty itself is
     // too large, the function already returned false and RSSI is used instead.
@@ -859,8 +860,7 @@ bool DistanceMonitorModule::evaluateGpsDistance(
     remoteState.distanceRatio = ratio;
     remoteState.rssiEstimate = DmDistanceBandEstimate{};
 
-    // SEARCH may reuse only the last *valid GPS* distance during a short GNSS
-    // outage. RSSI decisions never overwrite these fields.
+    // Keep the last valid GPS distance for radio-loss diagnosis.
     remoteState.hasLastValidDistance = true;
     remoteState.lastValidDistanceMeters = safeDistanceM;
     remoteState.lastValidDistanceRatio = ratio;
@@ -879,7 +879,8 @@ bool DistanceMonitorModule::evaluateRssiDistance(
     const bool btValid = remoteState.remoteBaseRssiValid;
     const bool tbValid =
         trackerToBase.isInitialized() &&
-        dmElapsedMs(nowMs, trackerToBase.lastUpdateMs()) <= linkTimeoutMs();
+        dmElapsedMs(nowMs, trackerToBase.lastUpdateMs()) <=
+            linkTimeoutMs(remoteState.appliedIntervalSec);
 
     float bestRssiDbm = 0.0F;
     if (!dmSelectBestRssi(
@@ -1055,12 +1056,15 @@ bool DistanceMonitorModule::isFaultAudible(
     return true;
 }
 
-uint32_t DistanceMonitorModule::linkTimeoutMs() const
+uint32_t DistanceMonitorModule::linkTimeoutMs(uint8_t intervalSec) const
 {
-    return static_cast<uint32_t>(
-               dmComputeMaxReportIntervalSec(
-                   runtimeConfig_.maxDistanceMeters)) *
-               1000U +
+    const uint32_t effectiveIntervalSec =
+        intervalSec >= DM_MIN_REPORT_INTERVAL_S
+            ? intervalSec
+            : dmComputeMaxReportIntervalSec(
+                  runtimeConfig_.maxDistanceMeters);
+
+    return 2U * effectiveIntervalSec * 1000U +
            DM_LINK_TIMEOUT_MARGIN_MS;
 }
 
@@ -1074,15 +1078,15 @@ void DistanceMonitorModule::updateBaseAudio(
     size_t localIndex,
     uint32_t nowMs)
 {
-    // Silent mode suppresses alarm audio only. Pairing, command confirmation,
-    // tracker notification and SEARCH sounds are emitted at their call sites.
+    // Silent mode suppresses alarm audio only. Pairing, command confirmation
+    // and tracker notification sounds are emitted at their call sites.
     if (DM_ALARM_AUDIO_SILENT)
     {
         audio_.stopSos();
         return;
     }
 
-    bool hasSos = localFallDetected_;
+    bool hasSos = false;
     for (size_t index = 0U;
          index < runtimeConfig_.memberCount;
          ++index)
@@ -1124,11 +1128,6 @@ void DistanceMonitorModule::updateBaseAudio(
         }
     }
 
-    // SEARCH owns ordinary proximity feedback while active. SOS/radio faults
-    // above remain higher priority.
-    if (searchModeActive_)
-        return;
-
     for (size_t index = 0U;
          index < runtimeConfig_.memberCount;
          ++index)
@@ -1162,128 +1161,6 @@ bool DistanceMonitorModule::isLocalBase() const
 {
     size_t index = 0U;
     return findLocalIndex(index) && nodeStates_[index].isBase;
-}
-
-bool DistanceMonitorModule::handleSearchToggle()
-{
-    initializeIfNeeded();
-
-    size_t localIndex = 0U;
-    if (!findLocalIndex(localIndex) || !nodeStates_[localIndex].isBase)
-        return false;
-
-    if (searchModeActive_)
-    {
-        searchModeActive_ = false;
-        searchTargetIndex_ = DM_MAX_MEMBERS;
-        hasSearchPulseTime_ = false;
-        audio_.playSearchExit();
-        LOG_INFO("{DM@Search} off");
-        return true;
-    }
-
-    size_t target = DM_MAX_MEMBERS;
-    for (size_t i = 0U;
-         i < runtimeConfig_.memberCount;
-         ++i)
-    {
-        if (i != localIndex &&
-            !nodeStates_[i].isBase &&
-            nodeStates_[i].paired)
-        {
-            target = i;
-            break;
-        }
-    }
-
-    if (target == DM_MAX_MEMBERS)
-    {
-        LOG_WARN("{DM@Search} no paired tracker");
-        return true;
-    }
-
-    searchModeActive_ = true;
-    searchTargetIndex_ = target;
-    hasSearchPulseTime_ = false;
-    audio_.playSearchEnter();
-
-    LOG_INFO(
-        "{DM@Search} on id=!%08lx contact=%.0fm",
-        static_cast<unsigned long>(nodeStates_[target].nodeNum),
-        static_cast<double>(DM_SEARCH_CONTACT_DISTANCE_M));
-    return true;
-}
-
-// SEARCH deliberately remains GNSS-only. A short GNSS outage may reuse the
-// last still-fresh valid GPS distance, but RSSI never controls the search tone.
-// At <=15 m the detector jumps directly to maximum proximity.
-void DistanceMonitorModule::processSearchMode(
-    size_t,
-    uint32_t nowMs)
-{
-    if (!searchModeActive_ ||
-        searchTargetIndex_ >= runtimeConfig_.memberCount)
-    {
-        return;
-    }
-
-    const DmNodeState &remote = nodeStates_[searchTargetIndex_];
-    if (!remote.paired || remote.sosActive || audio_.isSosActive())
-        return;
-
-    double distanceM = 0.0;
-    bool hasUsableGnssDistance = false;
-
-    if (remote.distanceSource == DmDistanceSource::Gps)
-    {
-        distanceM = remote.distanceMeters;
-        hasUsableGnssDistance = true;
-    }
-    else if (remote.hasLastValidDistance &&
-             dmElapsedMs(nowMs, remote.lastValidDistanceMs) <=
-                 linkTimeoutMs())
-    {
-        distanceM = remote.lastValidDistanceMeters;
-        hasUsableGnssDistance = true;
-    }
-
-    float proximity = 0.0F;
-    if (hasUsableGnssDistance)
-    {
-        distanceM = std::max(0.0, distanceM);
-        const double detectionMaxM =
-            static_cast<double>(runtimeConfig_.maxDistanceMeters) *
-            static_cast<double>(DM_SEARCH_DETECTION_MAX_RATIO);
-
-        if (distanceM <=
-            static_cast<double>(DM_SEARCH_CONTACT_DISTANCE_M))
-        {
-            proximity = 1.0F;
-        }
-        else if (detectionMaxM >
-                     static_cast<double>(DM_SEARCH_CONTACT_DISTANCE_M) &&
-                 distanceM < detectionMaxM)
-        {
-            proximity = static_cast<float>(
-                (detectionMaxM - distanceM) /
-                (detectionMaxM -
-                 static_cast<double>(DM_SEARCH_CONTACT_DISTANCE_M)));
-        }
-    }
-
-    const uint32_t pulseIntervalMs =
-        proximity >= 1.0F
-            ? DM_SEARCH_CONTACT_PULSE_INTERVAL_MS
-            : DM_SEARCH_PULSE_INTERVAL_MS;
-
-    if ((!hasSearchPulseTime_ ||
-         dmElapsedMs(nowMs, lastSearchPulseMs_) >= pulseIntervalMs) &&
-        !audio_.isBusyAboveSearch())
-    {
-        audio_.playSearchPulse(proximity);
-        lastSearchPulseMs_ = nowMs;
-        hasSearchPulseTime_ = true;
-    }
 }
 
 bool DistanceMonitorModule::handleSingleButtonPress()
@@ -1422,6 +1299,13 @@ bool DistanceMonitorModule::handleDoubleButtonPress()
     return true;
 }
 
+void DistanceMonitorModule::handleShutdownThresholdReached()
+{
+    initializeIfNeeded();
+    audio_.playShutdownReadyBip();
+    LOG_INFO("{DM@Button} shutdown threshold reached; release to power off");
+}
+
 uint32_t DistanceMonitorModule::prepareLocalShutdown()
 {
     initializeIfNeeded();
@@ -1431,12 +1315,7 @@ uint32_t DistanceMonitorModule::prepareLocalShutdown()
         return 0U;
 
     if (nodeStates_[localIndex].isBase)
-    {
-        searchModeActive_ = false;
-        searchTargetIndex_ = DM_MAX_MEMBERS;
-        hasSearchPulseTime_ = false;
         return 0U;
-    }
 
     size_t baseIndex = 0U;
     if (!findBaseIndex(baseIndex))
